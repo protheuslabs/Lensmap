@@ -2,7 +2,7 @@
 # LensMap
 
 <p align="center">
-<img width="800" height="450" alt="image" src="https://github.com/user-attachments/assets/2b2127a6-5f50-4f47-8f75-955f95ce0a50" />
+<img width="800" height="450" alt="image" src="./ezgif-753b52dfe5e287da.gif" />
 </p>
 
 
