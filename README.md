@@ -51,6 +51,16 @@ lensmap validate --lensmap=demo/lensmap.json
 lensmap render --lensmap=demo/lensmap.json --out=demo/render.md
 ```
 
+## Common mistake
+
+Do not run commands with literal placeholder paths like `path/to/lensmap.json`.
+
+Use a real file path, for example:
+
+```bash
+lensmap validate --lensmap=demo/lensmap.json
+```
+
 ## Schema
 
 - Canonical schema: `schema/lensmap.schema.v1.json`

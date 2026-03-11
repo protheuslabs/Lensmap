@@ -349,6 +349,50 @@ fn resolve_lensmap_path(
     normalize_path(&root.join("lensmap.json"))
 }
 
+fn looks_like_placeholder_path(raw: &str) -> bool {
+    let v = raw.trim().to_lowercase();
+    v == "path/to/lensmap.json"
+        || v == "path/to/render.md"
+        || v.starts_with("path/to/")
+        || v.contains("<path>")
+}
+
+fn quickstart_examples() -> Vec<&'static str> {
+    vec![
+        "lensmap init demo --mode=group --covers=demo/src",
+        "lensmap scan --lensmap=demo/lensmap.json",
+        "lensmap extract-comments --lensmap=demo/lensmap.json",
+        "lensmap validate --lensmap=demo/lensmap.json",
+        "lensmap render --lensmap=demo/lensmap.json --out=demo/render.md",
+    ]
+}
+
+fn lensmap_missing_payload(
+    root: &Path,
+    action: &str,
+    lensmap_path: &Path,
+    args: &ParsedArgs,
+) -> Value {
+    let raw = args.get("lensmap").unwrap_or("");
+    let placeholder = looks_like_placeholder_path(raw);
+    let mut hint =
+        String::from("LensMap file was not found. Run init first or pass a real --lensmap path.");
+    if placeholder {
+        hint = String::from(
+            "You passed a placeholder path literally (path/to/...). Replace it with a real path.",
+        );
+    }
+    json!({
+        "ok": false,
+        "type": "lensmap",
+        "action": action,
+        "error": "lensmap_missing",
+        "lensmap": normalize_relative(root, lensmap_path),
+        "hint": hint,
+        "examples": quickstart_examples(),
+    })
+}
+
 fn load_doc(path: &Path, fallback_mode: &str) -> LensMapDoc {
     if !path.exists() {
         return make_lensmap_doc(fallback_mode, vec![]);
@@ -1349,6 +1393,12 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
     let files = resolve_covers_to_files(root, &covers);
 
     if files.is_empty() {
+        if !lensmap_path.exists() && covers.is_empty() {
+            emit(
+                lensmap_missing_payload(root, "scan", &lensmap_path, args),
+                1,
+            );
+        }
         emit(
             json!({
                 "ok": false,
@@ -1356,6 +1406,8 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
                 "action": "scan",
                 "error": "no_files_resolved",
                 "covers": covers,
+                "hint": "No source files matched covers/files. Pass a real --covers value or run init first.",
+                "examples": quickstart_examples(),
             }),
             1,
         );
@@ -1489,6 +1541,12 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
     let files = resolve_covers_to_files(root, &covers);
 
     if files.is_empty() {
+        if !lensmap_path.exists() && covers.is_empty() {
+            emit(
+                lensmap_missing_payload(root, "extract_comments", &lensmap_path, args),
+                1,
+            );
+        }
         emit(
             json!({
                 "ok": false,
@@ -1496,6 +1554,8 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
                 "action": "extract_comments",
                 "error": "no_files_resolved",
                 "covers": covers,
+                "hint": "No source files matched covers/files. Pass a real --covers value or run init first.",
+                "examples": quickstart_examples(),
             }),
             1,
         );
@@ -1634,13 +1694,7 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
     let lensmap_path = resolve_lensmap_path(root, args, None);
     if !lensmap_path.exists() {
         emit(
-            json!({
-                "ok": false,
-                "type": "lensmap",
-                "action": "validate",
-                "error": "lensmap_missing",
-                "lensmap": normalize_relative(root, &lensmap_path),
-            }),
+            lensmap_missing_payload(root, "validate", &lensmap_path, args),
             1,
         );
     }
@@ -1847,13 +1901,7 @@ fn cmd_reanchor(root: &Path, args: &ParsedArgs) {
     let lensmap_path = resolve_lensmap_path(root, args, None);
     if !lensmap_path.exists() {
         emit(
-            json!({
-                "ok": false,
-                "type": "lensmap",
-                "action": "reanchor",
-                "error": "lensmap_missing",
-                "lensmap": normalize_relative(root, &lensmap_path),
-            }),
+            lensmap_missing_payload(root, "reanchor", &lensmap_path, args),
             1,
         );
     }
@@ -2022,13 +2070,7 @@ fn cmd_render(root: &Path, args: &ParsedArgs) {
     let lensmap_path = resolve_lensmap_path(root, args, None);
     if !lensmap_path.exists() {
         emit(
-            json!({
-                "ok": false,
-                "type": "lensmap",
-                "action": "render",
-                "error": "lensmap_missing",
-                "lensmap": normalize_relative(root, &lensmap_path),
-            }),
+            lensmap_missing_payload(root, "render", &lensmap_path, args),
             1,
         );
     }
@@ -2056,6 +2098,7 @@ fn cmd_render(root: &Path, args: &ParsedArgs) {
             files.insert(e.file.clone(), true);
         }
     }
+    let files_rendered = files.len();
 
     let mut anchor_map = HashMap::new();
     for a in &doc.anchors {
@@ -2187,7 +2230,7 @@ fn cmd_render(root: &Path, args: &ParsedArgs) {
         "action": "render",
         "lensmap": normalize_relative(root, &lensmap_path),
         "output": normalize_relative(root, &out_path),
-        "files_rendered": doc.covers.len(),
+        "files_rendered": files_rendered,
         "ts": now_iso(),
     });
     append_history(root, &out);
@@ -2198,13 +2241,7 @@ fn cmd_simplify(root: &Path, args: &ParsedArgs) {
     let lensmap_path = resolve_lensmap_path(root, args, None);
     if !lensmap_path.exists() {
         emit(
-            json!({
-                "ok": false,
-                "type": "lensmap",
-                "action": "simplify",
-                "error": "lensmap_missing",
-                "lensmap": normalize_relative(root, &lensmap_path),
-            }),
+            lensmap_missing_payload(root, "simplify", &lensmap_path, args),
             1,
         );
     }
@@ -2456,6 +2493,13 @@ fn usage() {
     println!("lensmap sync --to=<path>");
     println!("lensmap expose --name=<lens_name>");
     println!("lensmap status [--lensmap=path]");
+    println!();
+    println!("Quickstart:");
+    println!("  lensmap init demo --mode=group --covers=demo/src");
+    println!("  lensmap scan --lensmap=demo/lensmap.json");
+    println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
+    println!("  lensmap validate --lensmap=demo/lensmap.json");
+    println!("  lensmap render --lensmap=demo/lensmap.json --out=demo/render.md");
 }
 
 fn main() {
