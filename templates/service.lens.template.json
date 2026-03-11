@@ -1,0 +1,12 @@
+{
+  "fields": [
+    "title",
+    "owner",
+    "scope",
+    "anchor",
+    "ref",
+    "text"
+  ],
+  "template": true,
+  "type": "service"
+}

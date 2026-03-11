@@ -1,0 +1,7 @@
+/target/
+/local/
+/tmp/
+/public/
+/.idea/
+/.vscode/
+.DS_Store
