@@ -181,6 +181,15 @@ struct RefParts {
     end: usize,
 }
 
+#[derive(Clone, Debug)]
+struct RefSite {
+    ref_id: String,
+    is_inline: bool,
+    indent: String,
+    prefix: String,
+    spacing: String,
+}
+
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
@@ -863,6 +872,86 @@ fn parse_ref(ref_id: &str) -> Option<RefParts> {
         start,
         end,
     })
+}
+
+fn canonical_ref_id(parts: &RefParts) -> String {
+    if parts.start == parts.end {
+        format!("{}-{}", parts.anchor_id, parts.start)
+    } else {
+        format!("{}-{}-{}", parts.anchor_id, parts.start, parts.end)
+    }
+}
+
+fn parse_ref_marker_comment(comment: &str) -> Option<RefLineMatch> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        Regex::new(r"^\s*(//|#)\s*@lensmap-ref\s+([A-Fa-f0-9]{6,16}-\d+(?:-\d+)?)\s*$").unwrap()
+    });
+    let cap = re.captures(comment)?;
+    Some(RefLineMatch {
+        marker: cap.get(1)?.as_str().to_string(),
+        ref_id: cap.get(2)?.as_str().to_uppercase(),
+    })
+}
+
+fn locate_ref_site(line: &str, marker: &str) -> Option<RefSite> {
+    let idx = find_line_comment_index_outside_strings(line, marker)?;
+    let prefix_raw = &line[..idx];
+    let comment = &line[idx..];
+    let parsed = parse_ref_marker_comment(comment)?;
+    if parsed.marker != marker {
+        return None;
+    }
+
+    let is_inline = !prefix_raw.trim().is_empty();
+    if is_inline {
+        let prefix = prefix_raw.trim_end().to_string();
+        let spacing = if prefix_raw.len() > prefix.len() {
+            prefix_raw[prefix.len()..].to_string()
+        } else {
+            " ".to_string()
+        };
+        return Some(RefSite {
+            ref_id: parsed.ref_id,
+            is_inline: true,
+            indent: String::new(),
+            prefix,
+            spacing,
+        });
+    }
+
+    let indent = prefix_raw
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect::<String>();
+    Some(RefSite {
+        ref_id: parsed.ref_id,
+        is_inline: false,
+        indent,
+        prefix: String::new(),
+        spacing: " ".to_string(),
+    })
+}
+
+fn line_comment_lines(indent: &str, marker: &str, text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let normalized_text = text.replace('\r', "");
+    let raw_lines = normalized_text
+        .split('\n')
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>();
+    for line in raw_lines {
+        let body = line.trim();
+        if body.is_empty() {
+            out.push(format!("{}{}", indent, marker));
+        } else {
+            out.push(format!("{}{} {}", indent, marker, body));
+        }
+    }
+    if out.is_empty() {
+        out.push(format!("{}{}", indent, marker));
+    }
+    out
 }
 
 fn find_latest_anchor_for_line(
@@ -1563,13 +1652,7 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
 
     let mut existing_entry_keys = HashSet::new();
     for e in &doc.entries {
-        let key = format!(
-            "{}::{}::{}::{}",
-            e.file,
-            e.ref_id,
-            e.kind.clone().unwrap_or_default(),
-            e.text.clone().unwrap_or_default()
-        );
+        let key = format!("{}::{}", e.file, e.ref_id.to_uppercase());
         existing_entry_keys.insert(key);
     }
 
@@ -1619,13 +1702,7 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
                 source: Some("extract_comments".to_string()),
             };
 
-            let key = format!(
-                "{}::{}::{}::{}",
-                entry.file,
-                entry.ref_id,
-                entry.kind.clone().unwrap_or_default(),
-                entry.text.clone().unwrap_or_default()
-            );
+            let key = format!("{}::{}", entry.file, entry.ref_id.to_uppercase());
             if !existing_entry_keys.contains(&key) {
                 existing_entry_keys.insert(key);
                 new_entries.push(entry);
@@ -1683,6 +1760,319 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
         "lensmap": normalize_relative(root, &lensmap_path),
         "files_scanned": files.len(),
         "entries_added": new_entries.len(),
+        "ts": now_iso(),
+        "files": file_summaries,
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_annotate(root: &Path, args: &ParsedArgs) {
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "annotate", &lensmap_path, args),
+            1,
+        );
+    }
+
+    let mut doc = load_doc(&lensmap_path, "group");
+    let raw_ref = args
+        .get("ref")
+        .or_else(|| args.positional.get(1).map(String::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let text = args
+        .get("text")
+        .or_else(|| args.positional.get(2).map(String::as_str))
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    if raw_ref.is_empty() || text.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "annotate_requires_ref_and_text",
+                "hint": "Use --ref=<HEX-start[-end]> and --text=<comment text>.",
+                "example": "lensmap annotate --lensmap=demo/lensmap.json --ref=ABC123-2 --text=\"explain this branch\"",
+            }),
+            1,
+        );
+    }
+
+    let parsed = if let Some(parts) = parse_ref(&raw_ref) {
+        parts
+    } else {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "invalid_ref",
+                "ref": raw_ref,
+            }),
+            1,
+        );
+    };
+    let canonical_ref = canonical_ref_id(&parsed);
+    let anchor = if let Some(a) = doc
+        .anchors
+        .iter()
+        .find(|a| a.id.to_uppercase() == parsed.anchor_id)
+    {
+        a.clone()
+    } else {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "entry_anchor_missing",
+                "anchor_id": parsed.anchor_id,
+                "hint": "Run scan first so the anchor exists in lensmap.json.",
+            }),
+            1,
+        );
+    };
+
+    let mut file = args.get("file").unwrap_or(&anchor.file).trim().to_string();
+    if file.is_empty() {
+        file = anchor.file.clone();
+    }
+    if file.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "file_required",
+                "hint": "Pass --file=<path> or annotate against an anchor with a known file.",
+            }),
+            1,
+        );
+    }
+
+    let abs_file = resolve_from_root(root, &file);
+    if !is_within_root(root, &abs_file) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "security_entry_outside_root",
+                "file": file,
+            }),
+            1,
+        );
+    }
+    file = normalize_relative(root, &abs_file);
+
+    let kind_raw = args.get("kind").unwrap_or("comment").trim().to_lowercase();
+    let kind = if ["comment", "doc", "todo", "decision"].contains(&kind_raw.as_str()) {
+        kind_raw
+    } else {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "invalid_kind",
+                "kind": kind_raw,
+                "allowed": ["comment", "doc", "todo", "decision"],
+            }),
+            1,
+        );
+    };
+
+    let source = args.get("source").unwrap_or("annotate").trim().to_string();
+    let ts = now_iso();
+    let mut updated = false;
+
+    for entry in &mut doc.entries {
+        if entry.file == file && entry.ref_id.eq_ignore_ascii_case(&canonical_ref) {
+            entry.anchor_id = Some(parsed.anchor_id.clone());
+            entry.kind = Some(kind.clone());
+            entry.text = Some(text.clone());
+            entry.source = Some(source.clone());
+            entry.created_at = Some(ts.clone());
+            updated = true;
+            break;
+        }
+    }
+
+    if !updated {
+        doc.entries.push(EntryRecord {
+            ref_id: canonical_ref.clone(),
+            file: file.clone(),
+            anchor_id: Some(parsed.anchor_id.clone()),
+            kind: Some(kind.clone()),
+            text: Some(text.clone()),
+            created_at: Some(ts.clone()),
+            source: Some(source.clone()),
+        });
+    }
+
+    if !doc.covers.iter().any(|c| c == &file) {
+        doc.covers.push(file.clone());
+    }
+
+    save_doc(&lensmap_path, doc.clone());
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "annotate",
+        "lensmap": normalize_relative(root, &lensmap_path),
+        "ref": canonical_ref,
+        "file": file,
+        "kind": kind,
+        "updated_existing": updated,
+        "ts": ts,
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_merge(root: &Path, args: &ParsedArgs) {
+    let dry_run = args.has("dry-run");
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "merge", &lensmap_path, args),
+            1,
+        );
+    }
+
+    let doc = load_doc(&lensmap_path, "group");
+    let covers = normalize_covers(args, &doc, &[]);
+
+    let mut file_set = BTreeMap::new();
+    for c in &covers {
+        for f in resolve_covers_to_files(root, std::slice::from_ref(c)) {
+            file_set.insert(f, true);
+        }
+    }
+    for a in &doc.anchors {
+        if !a.file.is_empty() {
+            file_set.insert(a.file.clone(), true);
+        }
+    }
+    for e in &doc.entries {
+        if !e.file.is_empty() {
+            file_set.insert(e.file.clone(), true);
+        }
+    }
+
+    let files = file_set.keys().cloned().collect::<Vec<_>>();
+    if files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "merge",
+                "error": "no_files_resolved",
+                "covers": covers,
+                "hint": "No files to merge. Ensure covers/entries reference real files.",
+            }),
+            1,
+        );
+    }
+
+    let mut entry_map = HashMap::new();
+    for entry in &doc.entries {
+        let key = format!("{}::{}", entry.file, entry.ref_id.to_uppercase());
+        entry_map.insert(key, entry.clone());
+    }
+
+    let mut merged_total = 0usize;
+    let mut missing_entry_refs = vec![];
+    let mut file_summaries = vec![];
+
+    for rel in files {
+        let abs = resolve_from_root(root, &rel);
+        if !is_within_root(root, &abs) || !abs.exists() {
+            continue;
+        }
+
+        let style = comment_style_for(&abs);
+        let mut lines = split_lines(&fs::read_to_string(&abs).unwrap_or_default());
+        let mut changed = false;
+        let mut merged_in_file = 0usize;
+        let mut i = 0usize;
+
+        while i < lines.len() {
+            let site = if let Some(site) = locate_ref_site(&lines[i], style.line) {
+                site
+            } else {
+                i += 1;
+                continue;
+            };
+
+            let entry_key = format!("{}::{}", rel, site.ref_id.to_uppercase());
+            let entry = if let Some(entry) = entry_map.get(&entry_key) {
+                entry.clone()
+            } else {
+                missing_entry_refs.push(format!("{}:{}", rel, site.ref_id));
+                i += 1;
+                continue;
+            };
+
+            let entry_text = entry.text.unwrap_or_default();
+            if entry_text.trim().is_empty() {
+                i += 1;
+                continue;
+            }
+
+            if site.is_inline {
+                let first_line = entry_text.lines().next().unwrap_or("").trim();
+                if first_line.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                lines[i] = format!(
+                    "{}{}{} {}",
+                    site.prefix, site.spacing, style.line, first_line
+                );
+            } else {
+                let hydrated = line_comment_lines(&site.indent, style.line, &entry_text);
+                lines[i] = hydrated[0].clone();
+                if hydrated.len() > 1 {
+                    for (offset, extra) in hydrated.iter().skip(1).enumerate() {
+                        lines.insert(i + 1 + offset, extra.clone());
+                    }
+                    i += hydrated.len() - 1;
+                }
+            }
+
+            changed = true;
+            merged_total += 1;
+            merged_in_file += 1;
+            i += 1;
+        }
+
+        if changed && !dry_run {
+            let _ = fs::write(&abs, join_lines(&lines));
+        }
+
+        file_summaries.push(json!({
+            "file": rel,
+            "merged_refs": merged_in_file,
+            "changed": changed,
+        }));
+    }
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "merge",
+        "dry_run": dry_run,
+        "lensmap": normalize_relative(root, &lensmap_path),
+        "merged_refs": merged_total,
+        "missing_entry_refs": missing_entry_refs,
         "ts": now_iso(),
         "files": file_summaries,
     });
@@ -2258,13 +2648,7 @@ fn cmd_simplify(root: &Path, args: &ParsedArgs) {
     }
     let mut entry_map = BTreeMap::new();
     for e in doc.entries {
-        let key = format!(
-            "{}::{}::{}::{}",
-            e.file,
-            e.ref_id,
-            e.kind.clone().unwrap_or_default(),
-            e.text.clone().unwrap_or_default()
-        );
+        let key = format!("{}::{}", e.file, e.ref_id.to_uppercase());
         entry_map.insert(key, e);
     }
 
@@ -2481,12 +2865,18 @@ fn usage() {
     println!(
         "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path]"
     );
+    println!("lensmap annotate --lensmap=path --ref=<HEX-start[-end]> --text=<text> [--kind=comment|doc|todo|decision] [--file=path]");
     println!("lensmap template add <type>");
     println!("lensmap scan [--lensmap=path] [--covers=a,b] [--dry-run]");
     println!("lensmap extract-comments [--lensmap=path] [--covers=a,b] [--dry-run]");
+    println!(
+        "lensmap unmerge [--lensmap=path] [--covers=a,b] [--dry-run]  # alias of extract-comments"
+    );
+    println!("lensmap merge [--lensmap=path] [--covers=a,b] [--dry-run]");
     println!("lensmap validate [--lensmap=path]");
     println!("lensmap reanchor [--lensmap=path] [--dry-run]");
     println!("lensmap render [--lensmap=path] [--out=path]");
+    println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
     println!("lensmap simplify [--lensmap=path]");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
@@ -2498,6 +2888,8 @@ fn usage() {
     println!("  lensmap init demo --mode=group --covers=demo/src");
     println!("  lensmap scan --lensmap=demo/lensmap.json");
     println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
+    println!("  lensmap merge --lensmap=demo/lensmap.json");
+    println!("  lensmap unmerge --lensmap=demo/lensmap.json");
     println!("  lensmap validate --lensmap=demo/lensmap.json");
     println!("  lensmap render --lensmap=demo/lensmap.json --out=demo/render.md");
 }
@@ -2520,14 +2912,18 @@ fn main() {
 
     match cmd.as_str() {
         "init" => cmd_init(&root, &args),
+        "annotate" => cmd_annotate(&root, &args),
         "template" if args.positional.get(1).map(String::as_str) == Some("add") => {
             cmd_template_add(&root, &args)
         }
         "scan" => cmd_scan(&root, &args),
         "extract-comments" => cmd_extract_comments(&root, &args),
+        "unmerge" => cmd_extract_comments(&root, &args),
+        "merge" => cmd_merge(&root, &args),
         "validate" => cmd_validate(&root, &args),
         "reanchor" => cmd_reanchor(&root, &args),
         "render" => cmd_render(&root, &args),
+        "parse" => cmd_render(&root, &args),
         "simplify" => cmd_simplify(&root, &args),
         "polish" => cmd_polish(&root),
         "import" => cmd_import(&root, &args),

@@ -47,8 +47,20 @@ cargo build --release
 lensmap init demo --mode=group --covers=demo/src
 lensmap scan --lensmap=demo/lensmap.json
 lensmap extract-comments --lensmap=demo/lensmap.json
+lensmap merge --lensmap=demo/lensmap.json
+lensmap unmerge --lensmap=demo/lensmap.json
 lensmap validate --lensmap=demo/lensmap.json
 lensmap render --lensmap=demo/lensmap.json --out=demo/render.md
+```
+
+### Add manual annotation
+
+```bash
+lensmap annotate \
+  --lensmap=demo/lensmap.json \
+  --ref=ABC123-2 \
+  --text="Reason for this branch" \
+  --kind=comment
 ```
 
 ## Common mistake
@@ -70,12 +82,16 @@ lensmap validate --lensmap=demo/lensmap.json
 ## Commands
 
 - `init`
+- `annotate`
 - `template add`
 - `scan`
 - `extract-comments`
+- `unmerge` (alias of `extract-comments`)
+- `merge` (hydrate comments back into code from lensmap entries)
 - `validate`
 - `reanchor`
 - `render`
+- `parse` (alias of `render`)
 - `simplify`
 - `polish`
 - `import`
