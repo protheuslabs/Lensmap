@@ -1,5 +1,6 @@
 # LensMap
-<img width="200" height="280" alt="lensmap" src="https://github.com/user-attachments/assets/6e25c5ed-3c78-4040-b0da-b96f6e14b255" />
+<img width="1280" align=center height="720" alt="image" src="https://github.com/user-attachments/assets/467ba18e-7c62-475e-a8af-31471266d20d" />
+
 
 LensMap keeps source files lean by moving comments/docs into an external lens map anchored to stable function IDs.
 
