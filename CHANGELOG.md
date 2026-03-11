@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.3
+- Repositioned LensMap as a code-linked external documentation layer instead of a total inline-comment replacement.
+- Added smart scan mode (`--anchor-mode=smart`) so anchors are inserted only where LensMap already has work to do.
+- Hardened anchor resolution so render/validate/reanchor prefer source anchor ID, then symbol + fingerprint, then stored line hints.
+- Extended `annotate` to support `--file + --symbol + --offset`, including on-demand anchor creation for uncommented symbols.
+- Added `show` for filtered Markdown views by file, symbol, ref, or kind.
+- Replaced the placeholder `sync` command with a real workflow: reanchor, simplify, and refresh a readable Markdown sidecar.
+- Changed `render` defaults to write the Markdown sidecar beside the canonical JSON lensmap.
+
 ## 0.3.2
 - Added `package` command to bundle LensMap files into a single root directory with a manifest map.
 - Added `unpackage` command to restore bundled files, including missing-directory handling:

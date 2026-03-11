@@ -5,15 +5,32 @@
 <img width="800" height="450" alt="image" src="./ezgif-753b52dfe5e287da.gif" />
 </p>
 
-
-LensMap keeps source files lean by moving comments/docs into an external lens map anchored to stable function IDs.
+LensMap is a code-linked documentation layer. It keeps source files lean by moving heavier notes into an external lens map anchored to stable function IDs, while leaving small local comments inline when they genuinely help readability.
 
 ## What it does
 
-- Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`).
+- Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
 - Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
+- Resolves anchors using source anchor ID first, then symbol and fingerprint metadata, then stored line hints.
 - Extracts inline/source comments into lens entries.
+- Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
 - Validates marker coherence, collisions, drift, and root-path safety.
+
+## Positioning
+
+LensMap is best for:
+
+- design rationale
+- review notes
+- migration notes
+- audit and operational notes
+- generated explanations
+
+Keep inline comments for:
+
+- short local intent that helps while reading the file
+- language directives and preserve comments
+- comments that are clearer directly beside the code than in an external map
 
 ## Install
 
@@ -45,17 +62,31 @@ cargo build --release
 
 ```bash
 lensmap init demo --mode=group --covers=demo/src
-lensmap scan --lensmap=demo/lensmap.json
+lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart
 lensmap extract-comments --lensmap=demo/lensmap.json
+lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="Why this exists"
+lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
+lensmap sync --lensmap=demo/lensmap.json
 lensmap merge --lensmap=demo/lensmap.json
 lensmap unmerge --lensmap=demo/lensmap.json
 lensmap package --bundle-dir=.lenspack
 lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
 lensmap validate --lensmap=demo/lensmap.json
-lensmap render --lensmap=demo/lensmap.json --out=demo/render.md
 ```
 
-### Add manual annotation
+### Add annotation by symbol
+
+```bash
+lensmap annotate \
+  --lensmap=demo/lensmap.json \
+  --file=demo/src/app.ts \
+  --symbol=run \
+  --offset=1 \
+  --text="Reason for this branch" \
+  --kind=comment
+```
+
+### Add annotation by raw ref
 
 ```bash
 lensmap annotate \
@@ -94,12 +125,13 @@ lensmap validate --lensmap=demo/lensmap.json
 - `unpackage` (restore packaged lensmap files back to original dirs, with `prompt|skip|error` handling for missing dirs)
 - `validate`
 - `reanchor`
-- `render`
+- `render` (writes readable Markdown; defaults to a sibling `.md`)
 - `parse` (alias of `render`)
+- `show` (filtered readable view by file, symbol, ref, or kind)
 - `simplify`
 - `polish`
 - `import`
-- `sync`
+- `sync` (reanchor + simplify + render Markdown sidecar)
 - `expose`
 - `status`
 
@@ -107,6 +139,28 @@ lensmap validate --lensmap=demo/lensmap.json
 
 - Python: `# @lensmap-anchor ...` / `# @lensmap-ref ...`
 - JS/TS/Rust: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
+
+## Workflow
+
+```bash
+# 1. Add anchors only where LensMap actually has work to do.
+lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart
+
+# 2. Pull inline comments out into the lens map.
+lensmap extract-comments --lensmap=demo/lensmap.json
+
+# 3. Add more notes without touching raw ref IDs.
+lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="why this exists"
+
+# 4. Inspect one file or symbol.
+lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
+lensmap show --lensmap=demo/lensmap.json --symbol=run
+
+# 5. Reanchor drift, simplify the JSON, and refresh the Markdown sidecar.
+lensmap sync --lensmap=demo/lensmap.json
+```
+
+`render` and `sync` default to a Markdown file beside the JSON lensmap, so the machine-readable map stays canonical while the human-readable sidecar stays easy to open.
 
 ## Packaging workflow
 
