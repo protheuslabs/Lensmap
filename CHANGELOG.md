@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.2
+- Added `package` command to bundle LensMap files into a single root directory with a manifest map.
+- Added `unpackage` command to restore bundled files, including missing-directory handling:
+  - `--on-missing=prompt` (enter new dir or skip)
+  - `--on-missing=skip`
+  - `--on-missing=error`
+- Added directory remapping support for unpack (`--map=old_dir=new_dir`).
+
 ## 0.3.1
 - Added `annotate` command for manual LensMap entries by `ref`.
 - Added `merge` command to hydrate LensMap comment entries back into source files.

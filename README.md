@@ -49,6 +49,8 @@ lensmap scan --lensmap=demo/lensmap.json
 lensmap extract-comments --lensmap=demo/lensmap.json
 lensmap merge --lensmap=demo/lensmap.json
 lensmap unmerge --lensmap=demo/lensmap.json
+lensmap package --bundle-dir=.lenspack
+lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
 lensmap validate --lensmap=demo/lensmap.json
 lensmap render --lensmap=demo/lensmap.json --out=demo/render.md
 ```
@@ -88,6 +90,8 @@ lensmap validate --lensmap=demo/lensmap.json
 - `extract-comments`
 - `unmerge` (alias of `extract-comments`)
 - `merge` (hydrate comments back into code from lensmap entries)
+- `package` (collect lensmap files into one root bundle directory with a manifest map)
+- `unpackage` (restore packaged lensmap files back to original dirs, with `prompt|skip|error` handling for missing dirs)
 - `validate`
 - `reanchor`
 - `render`
@@ -103,6 +107,24 @@ lensmap validate --lensmap=demo/lensmap.json
 
 - Python: `# @lensmap-anchor ...` / `# @lensmap-ref ...`
 - JS/TS/Rust: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
+
+## Packaging workflow
+
+```bash
+# Package lensmap files to one root dir
+lensmap package --bundle-dir=.lenspack
+
+# Restore to original locations. If a dir is missing, prompt for new dir or skip.
+lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
+
+# Non-interactive option:
+lensmap unpackage --bundle-dir=.lenspack --on-missing=skip
+
+# Provide remap(s) for moved directories:
+lensmap unpackage --bundle-dir=.lenspack --map=apps/old=apps/new,docs/legacy=docs/archive
+```
+
+When `unpackage` skips a file, it remains in `.lenspack/files/` and processing continues to the next file.
 
 ## License
 

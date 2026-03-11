@@ -6,6 +6,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
 use walkdir::WalkDir;
@@ -118,6 +119,34 @@ struct LensMapDoc {
     anchors: Vec<AnchorRecord>,
     entries: Vec<EntryRecord>,
     metadata: Map<String, Value>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct PackageItem {
+    id: String,
+    original_path: String,
+    packaged_path: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolved_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct PackageManifest {
+    #[serde(rename = "type")]
+    doc_type: String,
+    version: String,
+    root: String,
+    bundle_dir: String,
+    created_at: String,
+    updated_at: String,
+    items: Vec<PackageItem>,
 }
 
 #[derive(Clone, Debug)]
@@ -400,6 +429,153 @@ fn lensmap_missing_payload(
         "hint": hint,
         "examples": quickstart_examples(),
     })
+}
+
+fn make_package_manifest(root: &Path, bundle_dir: &str) -> PackageManifest {
+    let ts = now_iso();
+    PackageManifest {
+        doc_type: "lensmap_package_manifest".to_string(),
+        version: "1.0.0".to_string(),
+        root: normalize_relative(root, root),
+        bundle_dir: bundle_dir.to_string(),
+        created_at: ts.clone(),
+        updated_at: ts,
+        items: vec![],
+    }
+}
+
+fn normalize_package_manifest(
+    mut manifest: PackageManifest,
+    root: &Path,
+    bundle_dir: &str,
+) -> PackageManifest {
+    if manifest.doc_type.trim().is_empty() {
+        manifest.doc_type = "lensmap_package_manifest".to_string();
+    }
+    if manifest.version.trim().is_empty() {
+        manifest.version = "1.0.0".to_string();
+    }
+    if manifest.root.trim().is_empty() {
+        manifest.root = normalize_relative(root, root);
+    }
+    if manifest.bundle_dir.trim().is_empty() {
+        manifest.bundle_dir = bundle_dir.to_string();
+    }
+    if manifest.created_at.trim().is_empty() {
+        manifest.created_at = now_iso();
+    }
+    if manifest.updated_at.trim().is_empty() {
+        manifest.updated_at = now_iso();
+    }
+    manifest
+}
+
+fn load_package_manifest(path: &Path, root: &Path, bundle_dir: &str) -> PackageManifest {
+    if !path.exists() {
+        return make_package_manifest(root, bundle_dir);
+    }
+    let raw = fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
+    let parsed = serde_json::from_str::<PackageManifest>(&raw)
+        .unwrap_or_else(|_| make_package_manifest(root, bundle_dir));
+    normalize_package_manifest(parsed, root, bundle_dir)
+}
+
+fn save_package_manifest(
+    path: &Path,
+    mut manifest: PackageManifest,
+    root: &Path,
+    bundle_dir: &str,
+) {
+    manifest.updated_at = now_iso();
+    let manifest = normalize_package_manifest(manifest, root, bundle_dir);
+    ensure_dir(path);
+    let _ = fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&manifest).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+}
+
+fn is_lensmap_filename(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let name = path.file_name().and_then(|v| v.to_str()).unwrap_or("");
+    name.eq_ignore_ascii_case("lensmap.json")
+        || name.ends_with(".lensmap.json")
+        || name.eq_ignore_ascii_case("lens_map.json")
+}
+
+fn discover_lensmap_files(root: &Path, bundle_dir_rel: &str) -> Vec<String> {
+    let bundle_abs = resolve_from_root(root, bundle_dir_rel);
+    let mut out = BTreeMap::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let abs = normalize_path(entry.path());
+        let rel = normalize_relative(root, &abs);
+        if should_skip_rel(&rel) {
+            continue;
+        }
+        if abs.starts_with(&bundle_abs) {
+            continue;
+        }
+        if !is_lensmap_filename(&abs) {
+            continue;
+        }
+        out.insert(rel, true);
+    }
+    out.keys().cloned().collect()
+}
+
+fn parse_dir_map(raw: Option<&str>) -> Vec<(String, String)> {
+    let mut out = vec![];
+    for part in split_csv(raw) {
+        if let Some((src, dst)) = part.split_once('=') {
+            let left = src.trim().trim_end_matches('/').to_string();
+            let right = dst.trim().trim_end_matches('/').to_string();
+            if !left.is_empty() && !right.is_empty() {
+                out.push((left, right));
+            }
+        }
+    }
+    out
+}
+
+fn copy_or_move_file(src: &Path, dst: &Path, keep_source: bool) -> Result<(), String> {
+    ensure_dir(dst);
+    fs::copy(src, dst).map_err(|e| {
+        format!(
+            "copy_failed:{}->{}:{}",
+            to_posix_str(src),
+            to_posix_str(dst),
+            e
+        )
+    })?;
+    if !keep_source {
+        fs::remove_file(src)
+            .map_err(|e| format!("remove_source_failed:{}:{}", to_posix_str(src), e))?;
+    }
+    Ok(())
+}
+
+fn prompt_line(prompt: &str) -> Option<String> {
+    if !io::stdin().is_terminal() {
+        return None;
+    }
+    let mut stderr = io::stderr();
+    let _ = write!(stderr, "{}", prompt);
+    let _ = stderr.flush();
+    let mut line = String::new();
+    io::stdin().read_line(&mut line).ok()?;
+    Some(line.trim().to_string())
 }
 
 fn load_doc(path: &Path, fallback_mode: &str) -> LensMapDoc {
@@ -2080,6 +2256,440 @@ fn cmd_merge(root: &Path, args: &ParsedArgs) {
     emit(out, 0);
 }
 
+fn apply_dir_maps(original_rel: &str, maps: &[(String, String)]) -> Option<String> {
+    for (from, to) in maps {
+        if original_rel == from {
+            return Some(to.clone());
+        }
+        let prefix = format!("{}/", from);
+        if original_rel.starts_with(&prefix) {
+            let suffix = &original_rel[from.len()..];
+            let candidate = format!("{}{}", to, suffix);
+            return Some(candidate.trim_start_matches('/').to_string());
+        }
+    }
+    None
+}
+
+fn cmd_package(root: &Path, args: &ParsedArgs) {
+    let dry_run = args.has("dry-run");
+    let bundle_dir = args
+        .get("bundle-dir")
+        .unwrap_or(".lenspack")
+        .trim()
+        .to_string();
+    let bundle_dir = if bundle_dir.is_empty() {
+        ".lenspack".to_string()
+    } else {
+        bundle_dir
+    };
+    let mode = args.get("mode").unwrap_or("move").trim().to_lowercase();
+    let keep_source = match mode.as_str() {
+        "move" => false,
+        "copy" => true,
+        _ => {
+            emit(
+                json!({
+                    "ok": false,
+                    "type": "lensmap",
+                    "action": "package",
+                    "error": "invalid_mode",
+                    "mode": mode,
+                    "allowed": ["move", "copy"],
+                }),
+                1,
+            );
+        }
+    };
+
+    let bundle_abs = resolve_from_root(root, &bundle_dir);
+    if !is_within_root(root, &bundle_abs) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package",
+                "error": "security_bundle_outside_root",
+                "bundle_dir": bundle_dir,
+            }),
+            1,
+        );
+    }
+
+    let mut candidate_files = split_csv(args.get("lensmaps"));
+    if candidate_files.is_empty() {
+        if let Some(single) = args.get("lensmap") {
+            candidate_files.push(single.to_string());
+        }
+    }
+    if candidate_files.is_empty() {
+        candidate_files = discover_lensmap_files(root, &bundle_dir);
+    }
+    if candidate_files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package",
+                "error": "no_lensmap_files_found",
+                "hint": "Create a lensmap first or pass --lensmaps=<file1,file2>.",
+            }),
+            1,
+        );
+    }
+
+    let files_dir = bundle_abs.join("files");
+    let manifest_path = bundle_abs.join("manifest.json");
+    let mut manifest = load_package_manifest(&manifest_path, root, &bundle_dir);
+
+    let mut by_original = HashMap::new();
+    for (idx, item) in manifest.items.iter().enumerate() {
+        by_original.insert(item.original_path.clone(), idx);
+    }
+
+    let mut packaged_count = 0usize;
+    let mut skipped = vec![];
+    let mut file_summaries = vec![];
+
+    for raw in candidate_files {
+        let abs = resolve_from_root(root, &raw);
+        if !is_within_root(root, &abs) {
+            skipped.push(format!("security_outside_root:{}", raw));
+            continue;
+        }
+        if !abs.exists() {
+            skipped.push(format!("missing:{}", raw));
+            continue;
+        }
+        if abs.starts_with(&bundle_abs) {
+            skipped.push(format!("inside_bundle:{}", raw));
+            continue;
+        }
+        if !is_lensmap_filename(&abs) {
+            skipped.push(format!("not_lensmap_file:{}", raw));
+            continue;
+        }
+
+        let rel = normalize_relative(root, &abs);
+        let id = hash_text(&rel).to_uppercase();
+        let packaged_rel = format!("files/{}.lensmap.json", id);
+        let packaged_abs = files_dir.join(format!("{}.lensmap.json", id));
+
+        let mut status = "packaged".to_string();
+        let mut err: Option<String> = None;
+        if !dry_run {
+            if let Err(e) = copy_or_move_file(&abs, &packaged_abs, keep_source) {
+                status = "error".to_string();
+                err = Some(e);
+            }
+        }
+
+        if status == "packaged" {
+            packaged_count += 1;
+        }
+
+        let item = PackageItem {
+            id: id.clone(),
+            original_path: rel.clone(),
+            packaged_path: packaged_rel.clone(),
+            status: if status == "packaged" && keep_source {
+                "packaged_copy".to_string()
+            } else {
+                status.clone()
+            },
+            resolved_path: None,
+            last_error: err.clone(),
+            updated_at: Some(now_iso()),
+        };
+
+        if let Some(idx) = by_original.get(&rel).copied() {
+            manifest.items[idx] = item;
+        } else {
+            by_original.insert(rel.clone(), manifest.items.len());
+            manifest.items.push(item);
+        }
+
+        file_summaries.push(json!({
+            "file": rel,
+            "packaged_as": packaged_rel,
+            "status": status,
+            "error": err,
+        }));
+    }
+
+    if !dry_run {
+        let _ = fs::create_dir_all(&files_dir);
+        save_package_manifest(&manifest_path, manifest.clone(), root, &bundle_dir);
+    }
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "package",
+        "dry_run": dry_run,
+        "mode": mode,
+        "bundle_dir": normalize_relative(root, &bundle_abs),
+        "manifest": normalize_relative(root, &manifest_path),
+        "packaged_count": packaged_count,
+        "skipped": skipped,
+        "ts": now_iso(),
+        "files": file_summaries,
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_unpackage(root: &Path, args: &ParsedArgs) {
+    let dry_run = args.has("dry-run");
+    let overwrite = args.has("overwrite");
+    let bundle_dir = args
+        .get("bundle-dir")
+        .unwrap_or(".lenspack")
+        .trim()
+        .to_string();
+    let bundle_dir = if bundle_dir.is_empty() {
+        ".lenspack".to_string()
+    } else {
+        bundle_dir
+    };
+    let on_missing = args
+        .get("on-missing")
+        .unwrap_or("prompt")
+        .trim()
+        .to_lowercase();
+    if !["prompt", "skip", "error"].contains(&on_missing.as_str()) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "unpackage",
+                "error": "invalid_on_missing",
+                "on_missing": on_missing,
+                "allowed": ["prompt", "skip", "error"],
+            }),
+            1,
+        );
+    }
+
+    let bundle_abs = resolve_from_root(root, &bundle_dir);
+    let manifest_path = bundle_abs.join("manifest.json");
+    if !manifest_path.exists() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "unpackage",
+                "error": "manifest_missing",
+                "manifest": normalize_relative(root, &manifest_path),
+                "hint": "Run lensmap package first.",
+            }),
+            1,
+        );
+    }
+
+    let dir_maps = parse_dir_map(args.get("map"));
+    let mut manifest = load_package_manifest(&manifest_path, root, &bundle_dir);
+    let mut unpacked_count = 0usize;
+    let mut skipped_count = 0usize;
+    let mut error_count = 0usize;
+    let mut non_interactive_prompt_skips = 0usize;
+    let mut file_summaries = vec![];
+
+    for item in &mut manifest.items {
+        let packaged_abs = bundle_abs.join(&item.packaged_path);
+        if !packaged_abs.exists() {
+            continue;
+        }
+
+        let mut dest_rel = item.original_path.clone();
+        if let Some(mapped) = apply_dir_maps(&item.original_path, &dir_maps) {
+            dest_rel = mapped;
+        }
+
+        let mut dest_abs = resolve_from_root(root, &dest_rel);
+        if !is_within_root(root, &dest_abs) {
+            item.status = "error".to_string();
+            item.last_error = Some("security_target_outside_root".to_string());
+            item.updated_at = Some(now_iso());
+            error_count += 1;
+            file_summaries.push(json!({
+                "original_path": item.original_path,
+                "status": "error",
+                "error": "security_target_outside_root",
+            }));
+            continue;
+        }
+
+        let mut parent_exists = dest_abs.parent().map(|p| p.exists()).unwrap_or(false);
+        if !parent_exists {
+            match on_missing.as_str() {
+                "skip" => {
+                    item.status = "packaged".to_string();
+                    item.last_error = Some("missing_dir_skipped".to_string());
+                    item.updated_at = Some(now_iso());
+                    skipped_count += 1;
+                    file_summaries.push(json!({
+                        "original_path": item.original_path,
+                        "status": "skipped",
+                        "reason": "missing_dir",
+                    }));
+                    continue;
+                }
+                "error" => {
+                    item.status = "error".to_string();
+                    item.last_error = Some("missing_dir_error".to_string());
+                    item.updated_at = Some(now_iso());
+                    error_count += 1;
+                    file_summaries.push(json!({
+                        "original_path": item.original_path,
+                        "status": "error",
+                        "error": "missing_dir_error",
+                    }));
+                    continue;
+                }
+                "prompt" => {
+                    let parent_rel = Path::new(&dest_rel)
+                        .parent()
+                        .map(to_posix_str)
+                        .unwrap_or_else(|| ".".to_string());
+                    let prompt = format!(
+                        "Missing dir for {} ({}). Enter new directory path, or 'skip': ",
+                        item.original_path, parent_rel
+                    );
+                    let response = prompt_line(&prompt);
+                    if response.is_none() {
+                        item.status = "packaged".to_string();
+                        item.last_error =
+                            Some("missing_dir_prompt_non_interactive_skipped".to_string());
+                        item.updated_at = Some(now_iso());
+                        skipped_count += 1;
+                        non_interactive_prompt_skips += 1;
+                        file_summaries.push(json!({
+                            "original_path": item.original_path,
+                            "status": "skipped",
+                            "reason": "non_interactive_prompt",
+                        }));
+                        continue;
+                    }
+                    let response = response.unwrap_or_default();
+                    if response.is_empty() || response.eq_ignore_ascii_case("skip") {
+                        item.status = "packaged".to_string();
+                        item.last_error = Some("missing_dir_prompt_skipped".to_string());
+                        item.updated_at = Some(now_iso());
+                        skipped_count += 1;
+                        file_summaries.push(json!({
+                            "original_path": item.original_path,
+                            "status": "skipped",
+                            "reason": "prompt_skip",
+                        }));
+                        continue;
+                    }
+                    let new_parent_abs = resolve_from_root(root, &response);
+                    if !is_within_root(root, &new_parent_abs) {
+                        item.status = "error".to_string();
+                        item.last_error = Some("security_prompt_target_outside_root".to_string());
+                        item.updated_at = Some(now_iso());
+                        error_count += 1;
+                        file_summaries.push(json!({
+                            "original_path": item.original_path,
+                            "status": "error",
+                            "error": "security_prompt_target_outside_root",
+                        }));
+                        continue;
+                    }
+
+                    let filename = Path::new(&item.original_path)
+                        .file_name()
+                        .and_then(|v| v.to_str())
+                        .unwrap_or("lensmap.json");
+                    dest_abs = new_parent_abs.join(filename);
+                    dest_rel = normalize_relative(root, &dest_abs);
+                    parent_exists = true;
+                }
+                _ => {}
+            }
+        }
+
+        if !parent_exists && !dry_run {
+            if let Some(parent) = dest_abs.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+        }
+
+        if dest_abs.exists() && !overwrite {
+            item.status = "error".to_string();
+            item.last_error = Some("target_exists_use_overwrite".to_string());
+            item.updated_at = Some(now_iso());
+            error_count += 1;
+            file_summaries.push(json!({
+                "original_path": item.original_path,
+                "status": "error",
+                "error": "target_exists_use_overwrite",
+                "target": dest_rel,
+            }));
+            continue;
+        }
+
+        if !dry_run {
+            if let Err(e) = copy_or_move_file(&packaged_abs, &dest_abs, false) {
+                item.status = "error".to_string();
+                item.last_error = Some(e.clone());
+                item.updated_at = Some(now_iso());
+                error_count += 1;
+                file_summaries.push(json!({
+                    "original_path": item.original_path,
+                    "status": "error",
+                    "error": e,
+                    "target": dest_rel,
+                }));
+                continue;
+            }
+        }
+
+        item.status = "unpacked".to_string();
+        item.resolved_path = Some(dest_rel.clone());
+        item.last_error = None;
+        item.updated_at = Some(now_iso());
+        unpacked_count += 1;
+        file_summaries.push(json!({
+            "original_path": item.original_path,
+            "status": "unpacked",
+            "target": dest_rel,
+        }));
+    }
+
+    if !dry_run {
+        save_package_manifest(&manifest_path, manifest.clone(), root, &bundle_dir);
+    }
+
+    let remaining_packaged = manifest
+        .items
+        .iter()
+        .filter(|i| bundle_abs.join(&i.packaged_path).exists())
+        .count();
+
+    let ok = error_count == 0;
+    let out = json!({
+        "ok": ok,
+        "type": "lensmap",
+        "action": "unpackage",
+        "dry_run": dry_run,
+        "bundle_dir": normalize_relative(root, &bundle_abs),
+        "manifest": normalize_relative(root, &manifest_path),
+        "on_missing": on_missing,
+        "overwrite": overwrite,
+        "unpacked_count": unpacked_count,
+        "skipped_count": skipped_count,
+        "error_count": error_count,
+        "remaining_packaged": remaining_packaged,
+        "non_interactive_prompt_skips": non_interactive_prompt_skips,
+        "ts": now_iso(),
+        "files": file_summaries,
+    });
+    append_history(root, &out);
+    emit(out, if ok { 0 } else { 1 });
+}
+
 fn cmd_validate(root: &Path, args: &ParsedArgs) {
     let lensmap_path = resolve_lensmap_path(root, args, None);
     if !lensmap_path.exists() {
@@ -2873,6 +3483,10 @@ fn usage() {
         "lensmap unmerge [--lensmap=path] [--covers=a,b] [--dry-run]  # alias of extract-comments"
     );
     println!("lensmap merge [--lensmap=path] [--covers=a,b] [--dry-run]");
+    println!(
+        "lensmap package [--bundle-dir=.lenspack] [--mode=move|copy] [--lensmaps=a,b] [--dry-run]"
+    );
+    println!("lensmap unpackage [--bundle-dir=.lenspack] [--on-missing=prompt|skip|error] [--map=old_dir=new_dir] [--overwrite] [--dry-run]");
     println!("lensmap validate [--lensmap=path]");
     println!("lensmap reanchor [--lensmap=path] [--dry-run]");
     println!("lensmap render [--lensmap=path] [--out=path]");
@@ -2890,6 +3504,8 @@ fn usage() {
     println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
     println!("  lensmap merge --lensmap=demo/lensmap.json");
     println!("  lensmap unmerge --lensmap=demo/lensmap.json");
+    println!("  lensmap package --bundle-dir=.lenspack");
+    println!("  lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt");
     println!("  lensmap validate --lensmap=demo/lensmap.json");
     println!("  lensmap render --lensmap=demo/lensmap.json --out=demo/render.md");
 }
@@ -2920,6 +3536,8 @@ fn main() {
         "extract-comments" => cmd_extract_comments(&root, &args),
         "unmerge" => cmd_extract_comments(&root, &args),
         "merge" => cmd_merge(&root, &args),
+        "package" => cmd_package(&root, &args),
+        "unpackage" => cmd_unpackage(&root, &args),
         "validate" => cmd_validate(&root, &args),
         "reanchor" => cmd_reanchor(&root, &args),
         "render" => cmd_render(&root, &args),
