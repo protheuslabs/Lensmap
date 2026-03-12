@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "dev.lensmap"
-version = "0.3.10"
+version = "0.3.11"
 
 repositories {
     mavenCentral()
@@ -28,7 +28,7 @@ tasks {
     patchPluginXml {
         sinceBuild.set("213")
         untilBuild.set("241.*")
-        changeNotes.set("Adds a structured note browser in the LensMap tool window, plus jump, copy-ref, and selected-note editing actions.")
+        changeNotes.set("Polishes the note browser with selection retention, direct LensMap-file opening, and copy-text actions.")
     }
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {

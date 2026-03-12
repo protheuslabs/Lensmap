@@ -50,14 +50,14 @@ Keep inline comments for:
 - Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | bash -s -- v0.3.10
+curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | bash -s -- v0.3.11
 ```
 
 - Windows (PowerShell):
 
 ```powershell
 iwr https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.ps1 -OutFile install.ps1
-./install.ps1 -Version v0.3.10
+./install.ps1 -Version v0.3.11
 ```
 
 ### From source
@@ -225,7 +225,7 @@ Current capabilities:
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
-- Open the selected note in source, copy its ref, and edit the selected entry in place
+- Open the selected note in source, open the backing LensMap file, copy its ref or note text, and edit the selected entry in place
 - English/Chinese prompts and notifications
 
 Build the plugin:

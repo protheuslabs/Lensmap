@@ -245,6 +245,12 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
     private val copyRefButton = JButton(t("Copy Ref", "复制引用")).apply {
         isEnabled = false
     }
+    private val copyTextButton = JButton(t("Copy Text", "复制内容")).apply {
+        isEnabled = false
+    }
+    private val openLensmapButton = JButton(t("Open LensMap", "打开 LensMap")).apply {
+        isEnabled = false
+    }
     private val editSelectedButton = JButton(t("Edit Selected", "编辑所选")).apply {
         isEnabled = false
     }
@@ -298,6 +304,8 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         refreshButton.addActionListener { refreshAction?.invoke() }
         openButton.addActionListener { entryList.selectedValue?.let { openEntryInEditor(project, it) } }
         copyRefButton.addActionListener { entryList.selectedValue?.let(::copyEntryRef) }
+        copyTextButton.addActionListener { entryList.selectedValue?.let(::copyEntryText) }
+        openLensmapButton.addActionListener { entryList.selectedValue?.let { openLensmapFile(project, it) } }
         editSelectedButton.addActionListener {
             entryList.selectedValue?.let {
                 editEntry(project, it)
@@ -313,7 +321,9 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
 
         val selectionToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
         selectionToolbar.add(openButton)
+        selectionToolbar.add(openLensmapButton)
         selectionToolbar.add(copyRefButton)
+        selectionToolbar.add(copyTextButton)
         selectionToolbar.add(editSelectedButton)
 
         val header = JPanel(BorderLayout())
@@ -341,11 +351,14 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         detailArea.text = selected?.let(::entryDetail) ?: emptyDetail
         detailArea.caretPosition = 0
         openButton.isEnabled = selected != null
+        openLensmapButton.isEnabled = selected?.lensmap?.isNotBlank() == true
         copyRefButton.isEnabled = selected != null
+        copyTextButton.isEnabled = selected != null
         editSelectedButton.isEnabled = selected != null
     }
 
     fun render(title: String, subtitle: String, entries: List<SearchEntry>, onRefresh: (() -> Unit)? = null) {
+        val selectedRef = entryList.selectedValue?.ref
         titleLabel.text = title
         subtitleLabel.text = if (entries.isEmpty()) subtitle else "$subtitle • ${entries.size} ${t("notes", "条注释")}"
         entryModel.removeAllElements()
@@ -358,7 +371,11 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         refreshAction = onRefresh
         refreshButton.isEnabled = onRefresh != null
         if (entries.isNotEmpty()) {
-            entryList.selectedIndex = 0
+            val selectedIndex = selectedRef
+                ?.let { ref -> entries.indexOfFirst { it.ref == ref } }
+                ?.takeIf { it >= 0 }
+                ?: 0
+            entryList.selectedIndex = selectedIndex
         } else {
             entryList.clearSelection()
             updateDetail()
@@ -613,6 +630,24 @@ private fun openEntryInEditor(project: Project, entry: SearchEntry) {
 
 private fun copyEntryRef(entry: SearchEntry) {
     Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(entry.ref), null)
+}
+
+private fun copyEntryText(entry: SearchEntry) {
+    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(entry.text), null)
+}
+
+private fun openLensmapFile(project: Project, entry: SearchEntry) {
+    val lensmap = entry.lensmap.ifBlank {
+        notify(project, t("LensMap file is missing for this note.", "当前注释缺少对应的 LensMap 文件。"), NotificationType.ERROR)
+        return
+    }
+    val root = projectRoot(project) ?: return
+    val path = root.resolve(lensmap)
+    val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path) ?: run {
+        notify(project, t("LensMap file could not be opened.", "无法打开对应的 LensMap 文件。"), NotificationType.ERROR)
+        return
+    }
+    OpenFileDescriptor(project, virtualFile, 0, 0).navigate(true)
 }
 
 private fun editNoteAtCaret(project: Project, editor: Editor, virtualFile: VirtualFile) {

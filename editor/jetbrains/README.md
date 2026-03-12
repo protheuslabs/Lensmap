@@ -9,7 +9,7 @@ JetBrains integration for LensMap with a persistent note browser tool window.
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
-- Open the selected note in source, copy its ref, and edit the selected entry from the tool window
+- Open the selected note in source, open the backing LensMap file, copy its ref or note text, and edit the selected entry from the tool window
 - English and Chinese prompts/notifications
 
 ## Build

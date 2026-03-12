@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.11
+- Polished the JetBrains note browser so it retains the selected entry across refreshes instead of snapping back to the first note.
+- Added JetBrains tool-window actions to open the backing LensMap file directly and copy the selected note text.
+- Updated published version strings and installation docs for the `v0.3.11` release.
+
 ## 0.3.10
 - Normalized the release version across the Rust CLI, VS Code extension, and JetBrains plugin so artifacts and tags line up again.
 - Upgraded the JetBrains tool window from a plain text dump to a structured note browser with a selectable list and detail pane.

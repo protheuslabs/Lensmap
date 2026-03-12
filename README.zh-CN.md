@@ -105,7 +105,7 @@ npm run package:vsix
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
-- 在工具窗口中打开源码位置、复制引用、编辑所选注释
+- 在工具窗口中打开源码位置、打开对应的 LensMap 文件、复制引用或注释内容、编辑所选注释
 - 英文/中文提示与通知
 
 构建方式：
