@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+- Added AST-backed symbol/span detection for JavaScript, TypeScript, Python, and Rust via tree-sitter, with regex fallback for unsupported or degraded parses.
+- Extended anchor records with symbol path and span metadata so resolution is less brittle when code moves.
+- Added a minimal VS Code integration in `editor/vscode` with current-file show, cursor annotation, and hover support for anchors/refs.
+
 ## 0.3.3
 - Repositioned LensMap as a code-linked external documentation layer instead of a total inline-comment replacement.
 - Added smart scan mode (`--anchor-mode=smart`) so anchors are inserted only where LensMap already has work to do.

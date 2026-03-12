@@ -9,6 +9,7 @@ use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::OnceLock;
+use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
 
 const SKIP_PREFIXES: &[&str] = &[
@@ -79,9 +80,15 @@ struct AnchorRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     line_anchor: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     line_symbol: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span_start: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    span_end: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -152,7 +159,9 @@ struct PackageManifest {
 #[derive(Clone, Debug)]
 struct FunctionHit {
     line_index: usize,
+    span_end_index: usize,
     symbol: String,
+    symbol_path: String,
     indent: String,
     fingerprint: String,
 }
@@ -853,7 +862,208 @@ fn rs_fn_re() -> &'static Regex {
     })
 }
 
-fn detect_functions(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
+fn line_indent(lines: &[String], line_index: usize) -> String {
+    lines
+        .get(line_index)
+        .map(|line| line.chars().take_while(|c| c.is_whitespace()).collect())
+        .unwrap_or_default()
+}
+
+fn normalize_fingerprint_text(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn node_text(node: Node<'_>, source: &[u8]) -> Option<String> {
+    let text = node.utf8_text(source).ok()?.trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn path_with_symbol(scope: &[String], symbol: &str) -> String {
+    let mut parts = scope.to_vec();
+    parts.push(symbol.to_string());
+    parts.join(".")
+}
+
+fn ast_scope_name(node: Node<'_>, source: &[u8], ext: &str) -> Option<String> {
+    match ext {
+        ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" => match node.kind() {
+            "class_declaration"
+            | "class"
+            | "function_declaration"
+            | "method_definition"
+            | "public_field_definition"
+            | "variable_declarator" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".py" => match node.kind() {
+            "class_definition" | "function_definition" | "async_function_definition" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".rs" => match node.kind() {
+            "function_item" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            "impl_item" => node
+                .child_by_field_name("type")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn ast_function_hit(
+    node: Node<'_>,
+    source: &[u8],
+    lines: &[String],
+    ext: &str,
+    scope: &[String],
+) -> Option<FunctionHit> {
+    let symbol = match ext {
+        ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" => match node.kind() {
+            "function_declaration" | "method_definition" | "public_field_definition" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            "variable_declarator" => {
+                let value = node.child_by_field_name("value")?;
+                if !["function", "arrow_function"].contains(&value.kind()) {
+                    return None;
+                }
+                node.child_by_field_name("name")
+                    .and_then(|child| node_text(child, source))
+            }
+            "pair" => {
+                let value = node.child_by_field_name("value")?;
+                if !["function", "arrow_function"].contains(&value.kind()) {
+                    return None;
+                }
+                node.child_by_field_name("key")
+                    .and_then(|child| node_text(child, source))
+            }
+            _ => None,
+        },
+        ".py" => match node.kind() {
+            "function_definition" | "async_function_definition" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".rs" => match node.kind() {
+            "function_item" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        _ => None,
+    }?;
+
+    let text = node_text(node, source)?;
+    let normalized = normalize_fingerprint_text(&text);
+    let start_line = node.start_position().row;
+    let end_line = node.end_position().row.max(start_line);
+    Some(FunctionHit {
+        line_index: start_line,
+        span_end_index: end_line,
+        symbol: symbol.clone(),
+        symbol_path: path_with_symbol(scope, &symbol),
+        indent: line_indent(lines, start_line),
+        fingerprint: hash_text(&normalized),
+    })
+}
+
+fn parser_for_extension(ext: &str) -> Option<Parser> {
+    let mut parser = Parser::new();
+    let language = match ext {
+        ".js" | ".jsx" | ".mjs" | ".cjs" => tree_sitter_javascript::LANGUAGE.into(),
+        ".ts" => tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        ".tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
+        ".py" => tree_sitter_python::LANGUAGE.into(),
+        ".rs" => tree_sitter_rust::LANGUAGE.into(),
+        _ => return None,
+    };
+    parser.set_language(&language).ok()?;
+    Some(parser)
+}
+
+fn collect_ast_functions(
+    node: Node<'_>,
+    source: &[u8],
+    lines: &[String],
+    ext: &str,
+    scope: &mut Vec<String>,
+    hits: &mut Vec<FunctionHit>,
+) {
+    if let Some(hit) = ast_function_hit(node, source, lines, ext, scope) {
+        hits.push(hit);
+    }
+
+    let pushed_scope = ast_scope_name(node, source, ext);
+    if let Some(name) = &pushed_scope {
+        scope.push(name.clone());
+    }
+
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ast_functions(child, source, lines, ext, scope, hits);
+    }
+
+    if pushed_scope.is_some() {
+        let _ = scope.pop();
+    }
+}
+
+fn detect_functions_ast(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
+    let ext = ext_of(abs_file);
+    let mut parser = if let Some(parser) = parser_for_extension(&ext) {
+        parser
+    } else {
+        return vec![];
+    };
+    let source = join_lines(lines);
+    let tree = if let Some(tree) = parser.parse(&source, None) {
+        tree
+    } else {
+        return vec![];
+    };
+    let mut scope = vec![];
+    let mut hits = vec![];
+    collect_ast_functions(
+        tree.root_node(),
+        source.as_bytes(),
+        lines,
+        &ext,
+        &mut scope,
+        &mut hits,
+    );
+    hits.sort_by(|a, b| {
+        if a.line_index != b.line_index {
+            return a.line_index.cmp(&b.line_index);
+        }
+        a.symbol_path.cmp(&b.symbol_path)
+    });
+    let mut deduped = vec![];
+    let mut seen = HashSet::new();
+    for hit in hits {
+        let key = format!(
+            "{}:{}:{}",
+            hit.line_index, hit.span_end_index, hit.symbol_path
+        );
+        if seen.insert(key) {
+            deduped.push(hit);
+        }
+    }
+    deduped
+}
+
+fn detect_functions_regex(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
     let ext = ext_of(abs_file);
     let mut out = Vec::new();
 
@@ -893,15 +1103,14 @@ fn detect_functions(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
         }
 
         if let Some(symbol) = symbol {
-            let indent = line
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .collect::<String>();
-            let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+            let indent = line_indent(lines, idx);
+            let normalized = normalize_fingerprint_text(line);
             let fingerprint = hash_text(&normalized);
             out.push(FunctionHit {
                 line_index: idx,
-                symbol,
+                span_end_index: idx,
+                symbol: symbol.clone(),
+                symbol_path: symbol,
                 indent,
                 fingerprint,
             });
@@ -909,6 +1118,20 @@ fn detect_functions(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
     }
 
     out
+}
+
+fn detect_functions(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
+    let ast_hits = detect_functions_ast(lines, abs_file);
+    if !ast_hits.is_empty() {
+        return ast_hits;
+    }
+    let mut regex_hits = detect_functions_regex(lines, abs_file);
+    for hit in &mut regex_hits {
+        if hit.symbol_path.is_empty() {
+            hit.symbol_path = hit.symbol.clone();
+        }
+    }
+    regex_hits
 }
 
 fn parse_anchor_line(line: &str) -> Option<AnchorLineMatch> {
@@ -1091,8 +1314,11 @@ fn materialize_anchors_for_file(root: &Path, abs: &Path, lines: &[String]) -> Ve
             id,
             file: rel.clone(),
             symbol: fn_hit.map(|f| f.symbol.clone()),
+            symbol_path: fn_hit.map(|f| f.symbol_path.clone()),
             line_anchor: Some(line_idx + 1),
             line_symbol: fn_hit.map(|f| f.line_index + 1),
+            span_start: fn_hit.map(|f| f.line_index + 1),
+            span_end: fn_hit.map(|f| f.span_end_index + 1),
             fingerprint: fn_hit.map(|f| f.fingerprint.clone()),
             updated_at: Some(now_iso()),
         });
@@ -1117,6 +1343,7 @@ fn ensure_anchor_for_symbol(
     doc: &mut LensMapDoc,
     file: &str,
     symbol: &str,
+    symbol_path: Option<&str>,
 ) -> Result<(AnchorRecord, bool), String> {
     let abs = resolve_from_root(root, file);
     if !is_within_root(root, &abs) {
@@ -1132,17 +1359,28 @@ fn ensure_anchor_for_symbol(
     let rel = normalize_relative(root, &abs);
     let mut candidates = functions
         .iter()
-        .filter(|f| f.symbol == symbol)
+        .filter(|f| {
+            if let Some(symbol_path) = symbol_path {
+                return f.symbol_path == symbol_path;
+            }
+            f.symbol == symbol
+        })
         .cloned()
         .collect::<Vec<_>>();
     if candidates.is_empty() {
-        return Err(format!("symbol_not_found:{}:{}", rel, symbol));
+        return Err(format!(
+            "symbol_not_found:{}:{}:{}",
+            rel,
+            symbol,
+            symbol_path.unwrap_or(symbol)
+        ));
     }
     if candidates.len() > 1 {
-        let tracked = doc
-            .anchors
-            .iter()
-            .find(|anchor| anchor.file == rel && anchor.symbol.as_deref() == Some(symbol));
+        let tracked = doc.anchors.iter().find(|anchor| {
+            anchor.file == rel
+                && (anchor.symbol_path.as_deref() == symbol_path
+                    || anchor.symbol.as_deref() == Some(symbol))
+        });
         if let Some(anchor) = tracked {
             if let Some(fp) = &anchor.fingerprint {
                 candidates = candidates
@@ -1153,7 +1391,12 @@ fn ensure_anchor_for_symbol(
         }
     }
     if candidates.len() != 1 {
-        return Err(format!("symbol_ambiguous:{}:{}", rel, symbol));
+        return Err(format!(
+            "symbol_ambiguous:{}:{}:{}",
+            rel,
+            symbol,
+            symbol_path.unwrap_or(symbol)
+        ));
     }
     let fn_hit = candidates.remove(0);
 
@@ -1247,6 +1490,12 @@ fn default_render_output_path(lensmap_path: &Path) -> PathBuf {
 }
 
 fn tracked_anchor_matches_function(anchor: &AnchorRecord, fn_hit: &FunctionHit) -> bool {
+    if let (Some(symbol_path), Some(fp)) = (&anchor.symbol_path, &anchor.fingerprint) {
+        return symbol_path == &fn_hit.symbol_path && fp == &fn_hit.fingerprint;
+    }
+    if let Some(symbol_path) = &anchor.symbol_path {
+        return symbol_path == &fn_hit.symbol_path;
+    }
     if let (Some(symbol), Some(fp)) = (&anchor.symbol, &anchor.fingerprint) {
         return symbol == &fn_hit.symbol && fp == &fn_hit.fingerprint;
     }
@@ -1287,24 +1536,49 @@ fn resolve_anchor_in_lines(
     let mut candidate: Option<FunctionHit> = None;
     let mut strategy = "unresolved".to_string();
 
-    if let Some(symbol) = &anchor.symbol {
-        let by_symbol = fns
+    if let Some(symbol_path) = &anchor.symbol_path {
+        let by_path = fns
             .iter()
-            .filter(|f| &f.symbol == symbol)
+            .filter(|f| &f.symbol_path == symbol_path)
             .cloned()
             .collect::<Vec<_>>();
-        if by_symbol.len() == 1 {
-            candidate = by_symbol.first().cloned();
-            strategy = "symbol".to_string();
-        } else if by_symbol.len() > 1 {
+        if by_path.len() == 1 {
+            candidate = by_path.first().cloned();
+            strategy = "symbol_path".to_string();
+        } else if by_path.len() > 1 {
             if let Some(fp) = &anchor.fingerprint {
-                let by_fp = by_symbol
+                let by_fp = by_path
                     .into_iter()
                     .filter(|f| &f.fingerprint == fp)
                     .collect::<Vec<_>>();
                 if by_fp.len() == 1 {
                     candidate = by_fp.first().cloned();
-                    strategy = "symbol+fingerprint".to_string();
+                    strategy = "symbol_path+fingerprint".to_string();
+                }
+            }
+        }
+    }
+
+    if let Some(symbol) = &anchor.symbol {
+        if candidate.is_none() {
+            let by_symbol = fns
+                .iter()
+                .filter(|f| &f.symbol == symbol)
+                .cloned()
+                .collect::<Vec<_>>();
+            if by_symbol.len() == 1 {
+                candidate = by_symbol.first().cloned();
+                strategy = "symbol".to_string();
+            } else if by_symbol.len() > 1 {
+                if let Some(fp) = &anchor.fingerprint {
+                    let by_fp = by_symbol
+                        .into_iter()
+                        .filter(|f| &f.fingerprint == fp)
+                        .collect::<Vec<_>>();
+                    if by_fp.len() == 1 {
+                        candidate = by_fp.first().cloned();
+                        strategy = "symbol+fingerprint".to_string();
+                    }
                 }
             }
         }
@@ -1332,6 +1606,18 @@ fn resolve_anchor_in_lines(
                 .cloned();
             if candidate.is_some() {
                 strategy = "line_symbol".to_string();
+            }
+        }
+    }
+
+    if candidate.is_none() {
+        if let (Some(span_start), Some(span_end)) = (anchor.span_start, anchor.span_end) {
+            candidate = fns
+                .iter()
+                .find(|f| f.line_index + 1 == span_start && f.span_end_index + 1 == span_end)
+                .cloned();
+            if candidate.is_some() {
+                strategy = "span".to_string();
             }
         }
     }
@@ -2354,6 +2640,7 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
         .to_string();
     let requested_file = args.get("file").unwrap_or("").trim().to_string();
     let requested_symbol = args.get("symbol").unwrap_or("").trim().to_string();
+    let requested_symbol_path = args.get("symbol-path").unwrap_or("").trim().to_string();
 
     if text.is_empty() {
         emit(
@@ -2420,22 +2707,32 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
                 );
             })
         };
-        let (anchor, created) =
-            ensure_anchor_for_symbol(root, &mut doc, &requested_file, &requested_symbol)
-                .unwrap_or_else(|reason| {
-                    emit(
-                        json!({
-                            "ok": false,
-                            "type": "lensmap",
-                            "action": "annotate",
-                            "error": "symbol_anchor_failed",
-                            "reason": reason,
-                            "file": requested_file,
-                            "symbol": requested_symbol,
-                        }),
-                        1,
-                    );
-                });
+        let (anchor, created) = ensure_anchor_for_symbol(
+            root,
+            &mut doc,
+            &requested_file,
+            &requested_symbol,
+            if requested_symbol_path.is_empty() {
+                None
+            } else {
+                Some(requested_symbol_path.as_str())
+            },
+        )
+        .unwrap_or_else(|reason| {
+            emit(
+                json!({
+                    "ok": false,
+                    "type": "lensmap",
+                    "action": "annotate",
+                    "error": "symbol_anchor_failed",
+                    "reason": reason,
+                    "file": requested_file,
+                    "symbol": requested_symbol,
+                    "symbol_path": requested_symbol_path,
+                }),
+                1,
+            );
+        });
         let parsed = RefParts {
             anchor_id: anchor.id.to_uppercase(),
             start,
@@ -2574,6 +2871,7 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
         "anchor_id": anchor.id,
         "anchor_created": created_anchor,
         "symbol": anchor.symbol,
+        "symbol_path": anchor.symbol_path,
         "updated_existing": updated,
         "ts": ts,
     });
@@ -3244,9 +3542,19 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
             .function_hit
             .or_else(|| fns.iter().find(|f| f.line_index > anchor_line).cloned())
         {
+            if let Some(symbol_path) = &anchor.symbol_path {
+                if symbol_path != &fn_hit.symbol_path {
+                    warnings.push(format!("symbol_path_drift:{}", id));
+                }
+            }
             if let Some(fp) = &anchor.fingerprint {
                 if fp != &fn_hit.fingerprint {
                     warnings.push(format!("fingerprint_drift:{}", id));
+                }
+            }
+            if let (Some(span_start), Some(span_end)) = (anchor.span_start, anchor.span_end) {
+                if span_start != fn_hit.line_index + 1 || span_end != fn_hit.span_end_index + 1 {
+                    warnings.push(format!("span_drift:{}", id));
                 }
             }
         } else {
@@ -3403,6 +3711,16 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
                     resolution.function_hit.as_ref().map(|f| f.line_index + 1);
                 doc.anchors[idx].symbol =
                     resolution.function_hit.as_ref().map(|f| f.symbol.clone());
+                doc.anchors[idx].symbol_path = resolution
+                    .function_hit
+                    .as_ref()
+                    .map(|f| f.symbol_path.clone());
+                doc.anchors[idx].span_start =
+                    resolution.function_hit.as_ref().map(|f| f.line_index + 1);
+                doc.anchors[idx].span_end = resolution
+                    .function_hit
+                    .as_ref()
+                    .map(|f| f.span_end_index + 1);
                 doc.anchors[idx].fingerprint = resolution
                     .function_hit
                     .as_ref()
@@ -3467,6 +3785,15 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
             doc.anchors[idx].line_symbol =
                 refreshed.function_hit.as_ref().map(|f| f.line_index + 1);
             doc.anchors[idx].symbol = refreshed.function_hit.as_ref().map(|f| f.symbol.clone());
+            doc.anchors[idx].symbol_path = refreshed
+                .function_hit
+                .as_ref()
+                .map(|f| f.symbol_path.clone());
+            doc.anchors[idx].span_start = refreshed.function_hit.as_ref().map(|f| f.line_index + 1);
+            doc.anchors[idx].span_end = refreshed
+                .function_hit
+                .as_ref()
+                .map(|f| f.span_end_index + 1);
             doc.anchors[idx].fingerprint = refreshed
                 .function_hit
                 .as_ref()
@@ -3663,7 +3990,8 @@ fn build_render_lines(
             .filter(|anchor| anchor.file == rel)
             .filter(|anchor| {
                 if let Some(symbol) = symbol_filter {
-                    return anchor.symbol.as_deref() == Some(symbol);
+                    return anchor.symbol.as_deref() == Some(symbol)
+                        || anchor.symbol_path.as_deref() == Some(symbol);
                 }
                 true
             })
@@ -3711,7 +4039,9 @@ fn build_render_lines(
                 continue;
             };
             if let Some(symbol) = symbol_filter {
-                if anchor.symbol.as_deref() != Some(symbol) {
+                if anchor.symbol.as_deref() != Some(symbol)
+                    && anchor.symbol_path.as_deref() != Some(symbol)
+                {
                     continue;
                 }
             }
@@ -3764,6 +4094,12 @@ fn build_render_lines(
                 if let Some(symbol) = &anchor.symbol {
                     row.push_str(&format!(" symbol=`{}`", symbol));
                 }
+                if let Some(symbol_path) = &anchor.symbol_path {
+                    row.push_str(&format!(" path=`{}`", symbol_path));
+                }
+                if let (Some(span_start), Some(span_end)) = (anchor.span_start, anchor.span_end) {
+                    row.push_str(&format!(" span=`{}-{}`", span_start, span_end));
+                }
                 if let Some(fp) = &anchor.fingerprint {
                     row.push_str(&format!(" fingerprint=`{}`", fp));
                 }
@@ -3807,9 +4143,13 @@ fn build_render_lines(
                 entry.text.unwrap_or_default().replace('\n', " ").trim()
             ));
             lines.push(format!(
-                "  anchor=`{}` symbol=`{}` resolve=`{}`",
+                "  anchor=`{}` symbol=`{}` path=`{}` resolve=`{}`",
                 anchor.id,
-                anchor.symbol.unwrap_or_else(|| "?".to_string()),
+                anchor.symbol.clone().unwrap_or_else(|| "?".to_string()),
+                anchor
+                    .symbol_path
+                    .clone()
+                    .unwrap_or_else(|| anchor.symbol.clone().unwrap_or_else(|| "?".to_string())),
                 resolution.strategy
             ));
 
@@ -4171,7 +4511,7 @@ fn usage() {
     println!(
         "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path]"
     );
-    println!("lensmap annotate --lensmap=path (--ref=<HEX-start[-end]> | --file=path --symbol=name [--offset=N] [--end-offset=M]) --text=<text> [--kind=comment|doc|todo|decision]");
+    println!("lensmap annotate --lensmap=path (--ref=<HEX-start[-end]> | --file=path --symbol=name [--symbol-path=Outer.inner] [--offset=N] [--end-offset=M]) --text=<text> [--kind=comment|doc|todo|decision]");
     println!("lensmap template add <type>");
     println!("lensmap scan [--lensmap=path] [--covers=a,b] [--anchor-mode=smart|all] [--dry-run]");
     println!("lensmap extract-comments [--lensmap=path] [--covers=a,b] [--dry-run]");
@@ -4187,7 +4527,7 @@ fn usage() {
     println!("lensmap reanchor [--lensmap=path] [--dry-run]");
     println!("lensmap render [--lensmap=path] [--out=path]  # defaults to sibling .md");
     println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
-    println!("lensmap show [--lensmap=path] [--file=path] [--symbol=name] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--out=path]");
+    println!("lensmap show [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--out=path]");
     println!("lensmap simplify [--lensmap=path]");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
@@ -4199,7 +4539,7 @@ fn usage() {
     println!("  lensmap init demo --mode=group --covers=demo/src");
     println!("  lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart");
     println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
-    println!("  lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text=\"why this exists\"");
+    println!("  lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --symbol-path=App.run --offset=1 --text=\"why this exists\"");
     println!("  lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts");
     println!("  lensmap merge --lensmap=demo/lensmap.json");
     println!("  lensmap unmerge --lensmap=demo/lensmap.json");

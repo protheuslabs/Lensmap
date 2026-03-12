@@ -81,6 +81,12 @@
             "null"
           ]
         },
+        "symbol_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "line_anchor": {
           "type": [
             "integer",
@@ -89,6 +95,20 @@
           "minimum": 1
         },
         "line_symbol": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "span_start": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        },
+        "span_end": {
           "type": [
             "integer",
             "null"

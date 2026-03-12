@@ -11,9 +11,10 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 
 - Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
 - Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
-- Resolves anchors using source anchor ID first, then symbol and fingerprint metadata, then stored line hints.
+- Resolves anchors using source anchor ID first, then AST-backed symbol path and fingerprint metadata, then stored line/span hints.
 - Extracts inline/source comments into lens entries.
 - Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
+- Includes a minimal VS Code integration for show/annotate/hover workflows.
 - Validates marker coherence, collisions, drift, and root-path safety.
 
 ## Positioning
@@ -81,6 +82,7 @@ lensmap annotate \
   --lensmap=demo/lensmap.json \
   --file=demo/src/app.ts \
   --symbol=run \
+  --symbol-path=App.run \
   --offset=1 \
   --text="Reason for this branch" \
   --kind=comment
@@ -161,6 +163,18 @@ lensmap sync --lensmap=demo/lensmap.json
 ```
 
 `render` and `sync` default to a Markdown file beside the JSON lensmap, so the machine-readable map stays canonical while the human-readable sidecar stays easy to open.
+
+## Editor integration
+
+There is now a minimal VS Code extension scaffold in `editor/vscode/`.
+
+Current capabilities:
+
+- `LensMap: Show Notes for Current File`
+- `LensMap: Add Note at Cursor`
+- hover support for `@lensmap-anchor` and `@lensmap-ref`
+
+The extension auto-detects a local LensMap repo and uses `cargo run -q -p lensmap -- ...` during development. Outside the repo, point it at an installed binary with the VS Code setting `lensmap.command`.
 
 ## Packaging workflow
 
