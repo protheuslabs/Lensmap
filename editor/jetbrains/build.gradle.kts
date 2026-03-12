@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "dev.lensmap"
-version = "0.3.11"
+version = "0.3.12"
 
 repositories {
     mavenCentral()
@@ -28,7 +28,7 @@ tasks {
     patchPluginXml {
         sinceBuild.set("213")
         untilBuild.set("241.*")
-        changeNotes.set("Polishes the note browser with selection retention, direct LensMap-file opening, and copy-text actions.")
+        changeNotes.set("Adds aggregated governance reports, default multi-LensMap policy checks, and editor report surfaces for policy, summary, and PR workflows.")
     }
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {

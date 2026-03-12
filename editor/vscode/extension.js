@@ -96,6 +96,20 @@ class LensMapEntryItem extends vscode.TreeItem {
   }
 }
 
+class LensMapActionItem extends vscode.TreeItem {
+  constructor(label, description, tooltip, command, icon) {
+    super(label, vscode.TreeItemCollapsibleState.None);
+    this.description = description;
+    this.tooltip = tooltip;
+    this.iconPath = new vscode.ThemeIcon(icon || "play");
+    this.contextValue = "lensmapAction";
+    this.command = {
+      command,
+      title: label,
+    };
+  }
+}
+
 class LensMapSidebarProvider {
   constructor() {
     this._onDidChangeTreeData = new vscode.EventEmitter();
@@ -104,6 +118,9 @@ class LensMapSidebarProvider {
     this.searchResults = [];
     this.searchQuery = "";
     this.currentFileLabel = t("Open a supported file to inspect LensMap notes.", "打开受支持的文件以查看 LensMap 注释。");
+    this.policyStatus = t("Run policy check", "运行策略检查");
+    this.summaryStatus = t("Open workspace summary", "打开工作区汇总");
+    this.prReportStatus = t("Generate PR report", "生成 PR 报告");
   }
 
   getTreeItem(item) {
@@ -134,8 +151,36 @@ class LensMapSidebarProvider {
       this.searchResults.map((entry) => new LensMapEntryItem(entry)),
       false,
     );
+    const governanceSection = new LensMapSectionItem(
+      t("Governance", "治理"),
+      "",
+      [
+        new LensMapActionItem(
+          t("Policy Check", "策略检查"),
+          this.policyStatus,
+          t("Run the aggregated LensMap policy check for this workspace.", "对当前工作区运行聚合 LensMap 策略检查。"),
+          "lensmap.runPolicyCheck",
+          "shield",
+        ),
+        new LensMapActionItem(
+          t("Summary", "汇总"),
+          this.summaryStatus,
+          t("Render the aggregated LensMap workspace summary.", "渲染聚合 LensMap 工作区汇总。"),
+          "lensmap.showSummary",
+          "graph",
+        ),
+        new LensMapActionItem(
+          t("PR Report", "PR 报告"),
+          this.prReportStatus,
+          t("Render the aggregated LensMap PR report for the current workspace.", "为当前工作区渲染聚合 LensMap PR 报告。"),
+          "lensmap.showPrReport",
+          "git-pull-request",
+        ),
+      ],
+      false,
+    );
 
-    return [currentSection, searchSection];
+    return [currentSection, searchSection, governanceSection];
   }
 
   async refresh(editor) {
@@ -164,6 +209,17 @@ class LensMapSidebarProvider {
       sidebarView.message = this.searchResults.length
         ? ""
         : t("No LensMap results matched this search.", "没有匹配该搜索的 LensMap 结果。");
+    }
+    this._onDidChangeTreeData.fire();
+  }
+
+  setGovernanceStatus(kind, description) {
+    if (kind === "policy") {
+      this.policyStatus = description;
+    } else if (kind === "summary") {
+      this.summaryStatus = description;
+    } else if (kind === "pr") {
+      this.prReportStatus = description;
     }
     this._onDidChangeTreeData.fire();
   }
@@ -203,6 +259,9 @@ function activate(context) {
       await refreshLensmapUi(vscode.window.activeTextEditor);
     }),
     vscode.commands.registerCommand("lensmap.searchWorkspaceNotes", searchWorkspaceNotes),
+    vscode.commands.registerCommand("lensmap.runPolicyCheck", runPolicyCheck),
+    vscode.commands.registerCommand("lensmap.showSummary", showSummary),
+    vscode.commands.registerCommand("lensmap.showPrReport", showPrReport),
     vscode.commands.registerCommand("lensmap.revealEntry", revealEntry),
     vscode.commands.registerCommand("lensmap.revealEntryGroup", revealEntryGroup),
     vscode.languages.registerHoverProvider(SUPPORTED_LANGUAGES, {
@@ -455,6 +514,144 @@ async function searchWorkspaceNotes() {
   } catch (error) {
     vscode.window.showErrorMessage(
       t(`LensMap search failed: ${error.message}`, `LensMap 搜索失败：${error.message}`),
+    );
+  }
+}
+
+async function runPolicyCheck() {
+  const workspaceRoot = getWorkspaceRootFromActiveEditor() || getAnyWorkspaceRoot();
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage(
+      t("Open a workspace before running LensMap policy checks.", "运行 LensMap 策略检查前请先打开工作区。"),
+    );
+    return;
+  }
+
+  try {
+    const payload = await runWorkspaceReport(workspaceRoot, {
+      kind: "policy",
+      filename: "policy-check.md",
+      args: (lensmaps, outPath) => [
+        "policy",
+        "check",
+        `--lensmaps=${lensmaps.join(",")}`,
+        "--report-only",
+        `--out=${outPath}`,
+      ],
+      successMessage: (payload) => {
+        const errors = payload.findings?.summary?.error_count || 0;
+        const warnings = payload.findings?.summary?.warning_count || 0;
+        const lensmaps = payload.stats?.lensmap_count || 0;
+        return t(
+          `LensMap policy check finished: ${errors} errors, ${warnings} warnings across ${lensmaps} maps.`,
+          `LensMap 策略检查完成：${lensmaps} 个映射中有 ${errors} 个错误、${warnings} 个警告。`,
+        );
+      },
+      status: (payload) => {
+        const errors = payload.findings?.summary?.error_count || 0;
+        const warnings = payload.findings?.summary?.warning_count || 0;
+        return t(`${errors} errors • ${warnings} warnings`, `${errors} 个错误 • ${warnings} 个警告`);
+      },
+    });
+    vscode.window.showInformationMessage(payload.message);
+  } catch (error) {
+    if (sidebarProvider) {
+      sidebarProvider.setGovernanceStatus("policy", t("Policy check failed", "策略检查失败"));
+    }
+    vscode.window.showErrorMessage(
+      t(`LensMap policy check failed: ${error.message}`, `LensMap 策略检查失败：${error.message}`),
+    );
+  }
+}
+
+async function showSummary() {
+  const workspaceRoot = getWorkspaceRootFromActiveEditor() || getAnyWorkspaceRoot();
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage(
+      t("Open a workspace before running LensMap summary.", "运行 LensMap 汇总前请先打开工作区。"),
+    );
+    return;
+  }
+
+  try {
+    const payload = await runWorkspaceReport(workspaceRoot, {
+      kind: "summary",
+      filename: "summary.md",
+      args: (lensmaps, outPath) => [
+        "summary",
+        `--lensmaps=${lensmaps.join(",")}`,
+        `--out=${outPath}`,
+      ],
+      successMessage: (payload) => {
+        const entries = payload.summary?.entry_count || 0;
+        const files = payload.summary?.files_with_notes || 0;
+        const stale = payload.summary?.stale_entries || 0;
+        return t(
+          `LensMap summary rendered: ${entries} notes across ${files} files, ${stale} stale.`,
+          `LensMap 汇总已生成：${files} 个文件中共 ${entries} 条注释，${stale} 条过期。`,
+        );
+      },
+      status: (payload) => {
+        const entries = payload.summary?.entry_count || 0;
+        const stale = payload.summary?.stale_entries || 0;
+        return t(`${entries} notes • ${stale} stale`, `${entries} 条注释 • ${stale} 条过期`);
+      },
+    });
+    vscode.window.showInformationMessage(payload.message);
+  } catch (error) {
+    if (sidebarProvider) {
+      sidebarProvider.setGovernanceStatus("summary", t("Summary failed", "汇总失败"));
+    }
+    vscode.window.showErrorMessage(
+      t(`LensMap summary failed: ${error.message}`, `LensMap 汇总失败：${error.message}`),
+    );
+  }
+}
+
+async function showPrReport() {
+  const workspaceRoot = getWorkspaceRootFromActiveEditor() || getAnyWorkspaceRoot();
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage(
+      t("Open a workspace before running LensMap PR report.", "运行 LensMap PR 报告前请先打开工作区。"),
+    );
+    return;
+  }
+
+  try {
+    const payload = await runWorkspaceReport(workspaceRoot, {
+      kind: "pr",
+      filename: "pr-report.md",
+      args: (lensmaps, outPath) => [
+        "pr",
+        "report",
+        `--lensmaps=${lensmaps.join(",")}`,
+        `--out=${outPath}`,
+      ],
+      successMessage: (payload) => {
+        const entries = payload.entry_count || 0;
+        const uncovered = Array.isArray(payload.uncovered_files) ? payload.uncovered_files.length : 0;
+        const stale = Array.isArray(payload.stale_refs) ? payload.stale_refs.length : 0;
+        return t(
+          `LensMap PR report rendered: ${entries} notes, ${uncovered} uncovered files, ${stale} stale refs.`,
+          `LensMap PR 报告已生成：${entries} 条注释、${uncovered} 个未覆盖文件、${stale} 个过期引用。`,
+        );
+      },
+      status: (payload) => {
+        const uncovered = Array.isArray(payload.uncovered_files) ? payload.uncovered_files.length : 0;
+        const strictFailures = Array.isArray(payload.strict_failures) ? payload.strict_failures.length : 0;
+        return t(
+          `${uncovered} uncovered • ${strictFailures} strict issues`,
+          `${uncovered} 个未覆盖 • ${strictFailures} 个严格失败`,
+        );
+      },
+    });
+    vscode.window.showInformationMessage(payload.message);
+  } catch (error) {
+    if (sidebarProvider) {
+      sidebarProvider.setGovernanceStatus("pr", t("PR report failed", "PR 报告失败"));
+    }
+    vscode.window.showErrorMessage(
+      t(`LensMap PR report failed: ${error.message}`, `LensMap PR 报告失败：${error.message}`),
     );
   }
 }
@@ -972,6 +1169,90 @@ async function loadLensmapDoc(lensmapPath) {
   } catch (_error) {
     return null;
   }
+}
+
+async function runWorkspaceReport(workspaceRoot, options) {
+  const lensmaps = await discoverWorkspaceLensmaps(workspaceRoot);
+  if (!lensmaps.length) {
+    throw new Error(t("No LensMap files were found in this workspace.", "当前工作区中未找到 LensMap 文件。"));
+  }
+
+  const outPath = await ensureReportArtifactPath(workspaceRoot, options.filename);
+  const payload = await runLensmap(workspaceRoot, options.args(lensmaps, outPath));
+  await openMarkdownPreview(outPath);
+  if (sidebarProvider) {
+    sidebarProvider.setGovernanceStatus(options.kind, options.status(payload));
+  }
+  return {
+    payload,
+    message: options.successMessage(payload),
+  };
+}
+
+async function ensureReportArtifactPath(workspaceRoot, filename) {
+  const baseDir = path.join(workspaceRoot, "local", "state", "lensmap", "vscode");
+  await fs.promises.mkdir(baseDir, { recursive: true });
+  return path.join(baseDir, filename);
+}
+
+async function openMarkdownPreview(fsPath) {
+  const uri = vscode.Uri.file(fsPath);
+  await vscode.commands.executeCommand("markdown.showPreview", uri);
+}
+
+async function discoverWorkspaceLensmaps(workspaceRoot) {
+  const folder = vscode.workspace.workspaceFolders?.find((item) => item.uri.fsPath === workspaceRoot)
+    || vscode.workspace.workspaceFolders?.find((item) => workspaceRoot.startsWith(item.uri.fsPath));
+  if (!folder) {
+    return discoverLensmapsByWalking(workspaceRoot);
+  }
+
+  const patterns = ["**/lensmap.json", "**/*.lensmap.json"];
+  const found = [];
+  for (const pattern of patterns) {
+    const matches = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(folder, pattern),
+      "**/{node_modules,target,.git,local/state}/**",
+      400,
+    );
+    found.push(...matches.map((item) => toPosix(path.relative(workspaceRoot, item.fsPath))));
+  }
+  const unique = Array.from(new Set(found)).sort();
+  return unique.length ? unique : discoverLensmapsByWalking(workspaceRoot);
+}
+
+function discoverLensmapsByWalking(workspaceRoot) {
+  const out = [];
+  const stack = [workspaceRoot];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    if (!current) {
+      continue;
+    }
+    for (const entry of safeReadDir(current)) {
+      const abs = path.join(current, entry);
+      let stat;
+      try {
+        stat = fs.statSync(abs);
+      } catch (_error) {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        if ([".git", "node_modules", "target", "artifacts"].includes(entry)) {
+          continue;
+        }
+        if (entry === "state" && path.basename(current) === "local") {
+          continue;
+        }
+        stack.push(abs);
+        continue;
+      }
+      if (entry === "lensmap.json" || entry.endsWith(".lensmap.json")) {
+        out.push(toPosix(path.relative(workspaceRoot, abs)));
+      }
+    }
+  }
+  return Array.from(new Set(out)).sort();
 }
 
 async function runLensmap(workspaceRoot, args) {

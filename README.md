@@ -1,68 +1,94 @@
-
 # LensMap
 
 [中文文档](./README.zh-CN.md)
 
-<p align="center">
-<img width="800" height="450" alt="image" src="./ezgif-753b52dfe5e287da.gif" />
-</p>
+LensMap is an internal engineering tool for code-linked documentation, annotation governance, and reviewable knowledge capture.
 
-LensMap is a code-linked documentation layer. It keeps source files lean by moving heavier notes into an external lens map anchored to stable function IDs, while leaving small local comments inline when they genuinely help readability.
+It keeps source files readable by moving heavy commentary out of code while preserving deterministic anchors back to the exact symbols and spans engineers care about.
 
-## What it does
+## Purpose
 
-- Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
-- Places new anchors inline on the symbol line by default, with standalone fallback when inline placement is unsafe.
-- Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
-- Resolves anchors using source anchor ID first, then AST-backed symbol path and fingerprint metadata, then stored line/span hints.
-- Keeps refs symbol-relative so inline and standalone anchors resolve the same way.
-- Repairs large refactors with signature-aware fuzzy matching before falling back to line hints.
-- Adds git-aware validate/reanchor protection for dirty overlap and dual-edit conflict cases.
-- Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin.
-- Builds a searchable repo-wide note index and supports structured CLI search.
-- Adds policy-driven note templates and structured collaboration metadata for owners, review state, scope, and tags.
-- Supports CI-oriented policy checks, repo summaries, and PR reports without GitHub API coupling.
-- Extracts inline/source comments into lens entries.
-- Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
-- Includes VS Code sidebar, decorations, search, show/annotate, and hover workflows.
-- Includes a JetBrains plugin with a persistent note browser tool window, plus current-file, workspace-search, jump, copy-ref, and caret annotation/edit flows.
-- Supports English and Chinese in the CLI and editor integration.
-- Validates marker coherence, collisions, drift, and root-path safety.
+LensMap exists to reduce knowledge boilerplate around software maintenance.
 
-## Positioning
+Use it when inline comments stop scaling and you need:
 
-LensMap is best for:
+- stable references for architecture, review, migration, and audit notes
+- externalized documentation without losing code locality
+- repo-wide search and reporting for code-linked notes
+- CI-enforceable ownership, review, and note hygiene policy
+- packaging and unpackaging of documentation outside normal source delivery
 
-- design rationale
-- review notes
-- migration notes
-- audit and operational notes
-- generated explanations
+LensMap is not a code generator and it is not intended to replace every inline comment. Keep short local intent inline. Use LensMap for heavier, longer-lived, or operationally important context.
+
+## Operating Model
+
+LensMap maintains three artifact layers:
+
+- Canonical JSON: machine authority for anchors, refs, metadata, and policy
+- Markdown sidecar: human-readable operational view of the same map
+- Search index: repo-wide query surface for editor and reporting workflows
+
+Anchors are attached to code using deterministic IDs:
+
+- `@lensmap-anchor <HEXID>` for symbol anchors
+- `<HEXID>-<offset>` or `<HEXID>-<start>-<end>` for note references
+
+Resolution order is designed to survive normal refactors:
+
+1. source anchor ID
+2. AST-backed symbol path and fingerprint
+3. span metadata
+4. line hints and fuzzy repair fallback
+
+## Core Capabilities
+
+- Smart anchor placement with inline-first insertion and safe standalone fallback
+- AST-backed symbol detection for JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin
+- External note capture for comments, docs, TODOs, and decisions
+- Structured note metadata: title, owner, author, scope, template, review status, review due date, tags
+- Built-in templates for architecture, migration, audit, review, decision, and TODO notes
+- Policy initialization and CI-oriented policy checks
+- Repo summaries and PR-oriented reporting from git diff without GitHub API dependence
+- Merge and unmerge workflows for round-tripping notes into source when needed
+- Packaging and unpackaging for post-production documentation handling
+- VS Code and JetBrains integration for browsing and editing notes in-editor
+- English and Chinese CLI and editor support
+- Fail-closed root-path safety for generated artifacts and package operations
+
+## Recommended Use
+
+Use LensMap for:
+
+- architecture rationale
+- migration plans and rollback notes
+- review rationale and follow-up decisions
+- audit and operational controls
+- generated explanations that should not clutter source
 
 Keep inline comments for:
 
-- short local intent that helps while reading the file
-- language directives and preserve comments
-- comments that are clearer directly beside the code than in an external map
+- local intent that improves immediate readability
+- language directives and preservation comments
+- very short comments that are clearer directly beside the line they describe
 
-## Install
+## Installation
 
 ### Prebuilt binary
 
-- Linux/macOS:
+Linux and macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | bash -s -- v0.3.11
+curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | bash -s -- v0.3.12
 ```
 
-- Windows (PowerShell):
+Windows PowerShell:
 
 ```powershell
 iwr https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.ps1 -OutFile install.ps1
-./install.ps1 -Version v0.3.11
+./install.ps1 -Version v0.3.12
 ```
 
-### From source
+### Build from source
 
 ```bash
 git clone https://github.com/protheuslabs/Lensmap.git
@@ -78,23 +104,22 @@ Force the CLI language if needed:
 LENSMAP_LANG=en ./target/release/lensmap validate --lensmap=demo/lensmap.json
 ```
 
-## Quick start
+## Quick Start
+
+Initialize a project map and scan for anchors:
 
 ```bash
 lensmap init demo --mode=group --covers=demo/src
 lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart --anchor-placement=inline
-lensmap extract-comments --lensmap=demo/lensmap.json
-lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="Why this exists"
-lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
-lensmap sync --lensmap=demo/lensmap.json
-lensmap merge --lensmap=demo/lensmap.json
-lensmap unmerge --lensmap=demo/lensmap.json
-lensmap package --bundle-dir=.lenspack
-lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
-lensmap validate --lensmap=demo/lensmap.json
 ```
 
-### Add annotation by symbol
+Extract existing source comments into the map:
+
+```bash
+lensmap extract-comments --lensmap=demo/lensmap.json
+```
+
+Add a structured note against a symbol:
 
 ```bash
 lensmap annotate \
@@ -103,11 +128,60 @@ lensmap annotate \
   --symbol=run \
   --symbol-path=App.run \
   --offset=1 \
-  --text="Reason for this branch" \
-  --kind=comment
+  --template=architecture \
+  --owner=platform \
+  --review-status=in_review
 ```
 
-### Add annotation by raw ref
+Inspect the map for a file or symbol:
+
+```bash
+lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
+lensmap show --lensmap=demo/lensmap.json --symbol=App.run
+```
+
+Refresh all managed artifacts:
+
+```bash
+lensmap sync --lensmap=demo/lensmap.json
+```
+
+## Governance Workflow
+
+Initialize LensMap policy inside the canonical JSON:
+
+```bash
+lensmap policy init \
+  --lensmap=demo/lensmap.json \
+  --require-owner=true \
+  --require-template=true \
+  --require-review-status=true \
+  --stale-after-days=30 \
+  --required-patterns='demo/src/*.rs,demo/src/*.ts'
+```
+
+Run CI-facing policy checks. By default, LensMap now discovers and aggregates every map under the repository root:
+
+```bash
+lensmap policy check --fail-on-warnings
+```
+
+Generate repo summaries and PR reports:
+
+```bash
+lensmap summary --out=local/state/lensmap/summary.md
+lensmap pr report --strict --out=local/state/lensmap/pr-report.md
+```
+
+Narrow the governance scope only when required:
+
+```bash
+lensmap policy check --lensmaps=demo/api/lensmap.json,demo/ui/lensmap.json --report-only
+```
+
+## Common Operator Workflows
+
+### Add a note by raw reference
 
 ```bash
 lensmap annotate \
@@ -117,112 +191,65 @@ lensmap annotate \
   --kind=comment
 ```
 
-## Common mistake
-
-Do not run commands with literal placeholder paths like `path/to/lensmap.json`.
-
-Use a real file path, for example:
+### Merge notes back into source
 
 ```bash
-lensmap validate --lensmap=demo/lensmap.json
+lensmap merge --lensmap=demo/lensmap.json
 ```
 
-## Schema
+### Pull them back out again
+
+```bash
+lensmap unmerge --lensmap=demo/lensmap.json
+```
+
+### Package documentation to a root bundle
+
+```bash
+lensmap package --bundle-dir=.lenspack
+lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
+```
+
+## Command Surface
+
+| Area | Commands |
+| --- | --- |
+| Initialization | `init`, `scan`, `reanchor`, `sync`, `status` |
+| Notes | `annotate`, `extract-comments`, `merge`, `unmerge`, `simplify` |
+| Templates and policy | `template add`, `template list`, `policy init`, `policy check` (aggregates all discovered LensMaps by default) |
+| Reading and reporting | `render`, `parse`, `show`, `index`, `search`, `summary`, `pr report` |
+| Packaging and utility | `package`, `unpackage`, `polish`, `import`, `expose` |
+
+Run `lensmap --help` for the full command signature set.
+
+## Schema and Specification
 
 - Canonical schema: `schema/lensmap.schema.v1.json`
-- Type: `lensmap`
-- Version: `1.0.0`
-- SRS for the current upgrade tranche: `docs/LENSMAP_SRS.md`
+- Current document version: `1.0.0`
+- Requirements specification for the current tranche: `docs/LENSMAP_SRS.md`
 
-## Commands
+## Marker Format by File Type
 
-- `init`
-- `annotate`
-- `template add`
-- `template list`
-- `scan` (`--anchor-placement=inline|standalone`)
-- `extract-comments`
-- `unmerge` (alias of `extract-comments`)
-- `merge` (hydrate comments back into code from lensmap entries)
-- `package` (collect lensmap files into one root bundle directory with a manifest map)
-- `unpackage` (restore packaged lensmap files back to original dirs, with `prompt|skip|error` handling for missing dirs)
-- `validate`
-- `policy init` (store repo policy such as required owners/templates/review status and stale thresholds)
-- `policy check` (CI-friendly validation against LensMap policy)
-- `reanchor` (git-aware dirty-overlap protection)
-- `render` (writes readable Markdown; supports filtering by owner/template/review/scope/tag)
-- `parse` (alias of `render`)
-- `show` (filtered readable view by file, symbol, ref, kind, owner, template, review, scope, or tag)
-- `simplify`
-- `index` (build a repo-wide `.lensmap-index.json`)
-- `search` (search repo notes live or through a saved index, including owner/template/review/scope/tag filters)
-- `summary` (repo-aware note rollups in JSON and optional Markdown)
-- `pr report` (git diff oriented report for changed files, stale notes, and missing-note coverage)
-- `polish`
-- `import`
-- `sync` (reanchor + simplify + refresh canonical JSON, Markdown sidecar, and search index)
-- `expose`
-- `status`
+- Python: `# @lensmap-anchor ...` and `# @lensmap-ref ...`
+- JS/TS/Rust/Go/Java/C/C++/C#/Kotlin: `// @lensmap-anchor ...` and `// @lensmap-ref ...`
 
-## Marker format by file type
+## Editor Integration
 
-- Python: `# @lensmap-anchor ...` / `# @lensmap-ref ...`
-- JS/TS/Rust/Go/Java/C/C++/C#/Kotlin: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
+### VS Code
 
-## Workflow
+The VS Code extension lives in `editor/vscode` and provides:
 
-```bash
-# 1. Add anchors only where LensMap actually has work to do.
-lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart
+- current-file note browsing
+- add and edit note at cursor
+- workspace note search
+- workspace governance actions for `policy check`, `summary`, and `pr report`
+- sidebar views
+- inline decorations and code lenses
+- hover support for LensMap anchors and refs
+- Markdown preview of generated governance reports under `local/state/lensmap/vscode/`
+- English and Chinese prompts and messages
 
-# 2. Pull inline comments out into the lens map.
-lensmap extract-comments --lensmap=demo/lensmap.json
-
-# 3. Add more notes without touching raw ref IDs.
-lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="why this exists"
-
-# 3b. Or use a structured template with policy metadata.
-lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --template=architecture --owner=platform --review-status=in_review
-
-# 3c. Initialize repo policy for CI.
-lensmap policy init --lensmap=demo/lensmap.json --require-owner=true --require-template=true --require-review-status=true --stale-after-days=30
-
-# 4. Inspect one file or symbol.
-lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
-lensmap show --lensmap=demo/lensmap.json --symbol=run
-
-# 5. Reanchor drift, simplify the JSON, and refresh the Markdown sidecar + search index.
-lensmap sync --lensmap=demo/lensmap.json
-
-# 6. Summarize or report note coverage for CI/review.
-lensmap summary --lensmaps=demo/lensmap.json --owner=platform --out=demo/lensmap-summary.md
-lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict
-```
-
-`render` and `sync` default to a Markdown file beside the JSON lensmap, while `sync` also refreshes the repo search index. The canonical JSON stays authoritative, the Markdown sidecar stays human-readable, and the search index stays editor/repo-query friendly.
-
-## Editor integration
-
-There is now a minimal VS Code extension scaffold in `editor/vscode/`.
-
-Current capabilities:
-
-- `LensMap: Show Notes for Current File`
-- `LensMap: Add Note at Cursor`
-- `LensMap: Edit Note at Cursor`
-- Explorer sidebar with current-file notes and workspace search results
-- Inline end-of-line note decorations for current-file entries
-- Anchor comment dimming so anchors stay low-noise while editing
-- Inline code lenses for showing and editing notes on the current line
-- `LensMap: Refresh Sidebar`
-- `LensMap: Search Workspace Notes`
-- sidebar entry edit action
-- hover support for `@lensmap-anchor` and `@lensmap-ref`
-- follows the VS Code UI language for English/Chinese prompts and messages
-
-The extension auto-detects a local LensMap repo and uses `cargo run -q -p lensmap -- ...` during development. Outside the repo, point it at an installed binary with the VS Code setting `lensmap.command`.
-
-### Package the extension
+Package it with:
 
 ```bash
 cd editor/vscode
@@ -230,49 +257,54 @@ npm install
 npm run package:vsix
 ```
 
-That writes a `.vsix` bundle to `artifacts/lensmap-vscode-<version>.vsix`.
+Artifact output:
 
-## JetBrains plugin
+- `artifacts/lensmap-vscode-<version>.vsix`
 
-There is now a JetBrains plugin in `editor/jetbrains/` with a persistent note browser tool window.
+### JetBrains
 
-Current capabilities:
+The JetBrains plugin lives in `editor/jetbrains` and provides:
 
-- Persistent `LensMap` note browser for current-file or search output
-- `LensMap > Show Current File Notes`
-- `LensMap > Search Workspace Notes`
-- `LensMap > Add Note at Caret`
-- `LensMap > Edit Note at Caret`
-- Open the selected note in source, open the backing LensMap file, copy its ref or note text, and edit the selected entry in place
-- English/Chinese prompts and notifications
+- persistent LensMap tool window
+- current-file note browsing
+- workspace search
+- add and edit note at caret
+- workspace governance actions for `policy check`, `summary`, and `pr report`
+- open-in-source and open-map actions
+- copy-ref and copy-note-text actions
+- in-tool-window rendering for governance reports, with artifacts stored under `local/state/lensmap/jetbrains/`
+- English and Chinese prompts and notifications
 
-Build the plugin:
+Build it with:
 
 ```bash
 cd editor/jetbrains
 ./gradlew buildPlugin
 ```
 
-The packaged plugin ZIP is written to `editor/jetbrains/build/distributions/`.
+Artifact output:
 
-## Packaging workflow
+- `editor/jetbrains/build/distributions/lensmap-jetbrains-<version>.zip`
 
-```bash
-# Package lensmap files to one root dir
-lensmap package --bundle-dir=.lenspack
+## Safety Model
 
-# Restore to original locations. If a dir is missing, prompt for new dir or skip.
-lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
+LensMap is intended to fail closed in operationally sensitive cases.
 
-# Non-interactive option:
-lensmap unpackage --bundle-dir=.lenspack --on-missing=skip
+Current protections include:
 
-# Provide remap(s) for moved directories:
-lensmap unpackage --bundle-dir=.lenspack --map=apps/old=apps/new,docs/legacy=docs/archive
-```
+- blocking generated outputs outside the repository root
+- blocking package bundle directories outside the repository root
+- validating marker coherence by file type
+- detecting comment collisions and unresolved refs
+- git-aware protection for dirty overlap and dual-edit conflict cases during reanchor flows
 
-When `unpackage` skips a file, it remains in `.lenspack/files/` and processing continues to the next file.
+## Operational Notes
 
-## License
+- Do not use literal placeholder paths such as `path/to/lensmap.json`.
+- Prefer `sync` after meaningful note churn so JSON, Markdown, and search index stay aligned.
+- Prefer `policy check` in CI when using LensMap as a governed documentation surface.
+- Prefer templates for repeated note classes so ownership and review metadata stay coherent.
 
-MIT
+## Support
+
+LensMap is maintained as an internal engineering tool. For feature work, schema changes, or editor workflow changes, start with the SRS and keep the canonical JSON contract stable unless migration is explicit.

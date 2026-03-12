@@ -38,6 +38,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.Locale
+import java.util.stream.Collectors
 import javax.swing.JButton
 import javax.swing.DefaultListModel
 import javax.swing.JLabel
@@ -254,8 +255,12 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
     private val editSelectedButton = JButton(t("Edit Selected", "编辑所选")).apply {
         isEnabled = false
     }
+    private val openArtifactButton = JButton(t("Open Report", "打开报告")).apply {
+        isEnabled = false
+    }
     private var refreshAction: (() -> Unit)? = null
     private var emptyDetail = t("No LensMap notes matched.", "没有匹配的 LensMap 注释。")
+    private var reportArtifactPath: Path? = null
 
     init {
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 8))
@@ -300,12 +305,22 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
                 }
             }
         }
+        val policyButton = JButton(t("Policy", "策略")).apply {
+            addActionListener { showPolicyCheck(project) }
+        }
+        val summaryButton = JButton(t("Summary", "汇总")).apply {
+            addActionListener { showWorkspaceSummary(project) }
+        }
+        val prReportButton = JButton(t("PR Report", "PR 报告")).apply {
+            addActionListener { showPrReport(project) }
+        }
 
         refreshButton.addActionListener { refreshAction?.invoke() }
         openButton.addActionListener { entryList.selectedValue?.let { openEntryInEditor(project, it) } }
         copyRefButton.addActionListener { entryList.selectedValue?.let(::copyEntryRef) }
         copyTextButton.addActionListener { entryList.selectedValue?.let(::copyEntryText) }
         openLensmapButton.addActionListener { entryList.selectedValue?.let { openLensmapFile(project, it) } }
+        openArtifactButton.addActionListener { reportArtifactPath?.let { openArtifact(project, it) } }
         editSelectedButton.addActionListener {
             entryList.selectedValue?.let {
                 editEntry(project, it)
@@ -317,6 +332,9 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         toolbar.add(searchButton)
         toolbar.add(annotateButton)
         toolbar.add(editButton)
+        toolbar.add(policyButton)
+        toolbar.add(summaryButton)
+        toolbar.add(prReportButton)
         toolbar.add(refreshButton)
 
         val selectionToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
@@ -325,6 +343,7 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         selectionToolbar.add(copyRefButton)
         selectionToolbar.add(copyTextButton)
         selectionToolbar.add(editSelectedButton)
+        selectionToolbar.add(openArtifactButton)
 
         val header = JPanel(BorderLayout())
         val heading = JPanel(BorderLayout())
@@ -359,6 +378,7 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
 
     fun render(title: String, subtitle: String, entries: List<SearchEntry>, onRefresh: (() -> Unit)? = null) {
         val selectedRef = entryList.selectedValue?.ref
+        reportArtifactPath = null
         titleLabel.text = title
         subtitleLabel.text = if (entries.isEmpty()) subtitle else "$subtitle • ${entries.size} ${t("notes", "条注释")}"
         entryModel.removeAllElements()
@@ -370,6 +390,7 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         }
         refreshAction = onRefresh
         refreshButton.isEnabled = onRefresh != null
+        openArtifactButton.isEnabled = false
         if (entries.isNotEmpty()) {
             val selectedIndex = selectedRef
                 ?.let { ref -> entries.indexOfFirst { it.ref == ref } }
@@ -380,6 +401,31 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
             entryList.clearSelection()
             updateDetail()
         }
+    }
+
+    fun renderReport(
+        title: String,
+        subtitle: String,
+        content: String,
+        artifactPath: Path,
+        onRefresh: (() -> Unit)? = null,
+    ) {
+        reportArtifactPath = artifactPath
+        titleLabel.text = title
+        subtitleLabel.text = subtitle
+        entryModel.removeAllElements()
+        entryList.clearSelection()
+        emptyDetail = content
+        detailArea.text = content
+        detailArea.caretPosition = 0
+        refreshAction = onRefresh
+        refreshButton.isEnabled = onRefresh != null
+        openButton.isEnabled = false
+        openLensmapButton.isEnabled = false
+        copyRefButton.isEnabled = false
+        copyTextButton.isEnabled = false
+        editSelectedButton.isEnabled = false
+        openArtifactButton.isEnabled = true
     }
 }
 
@@ -507,6 +553,25 @@ private fun showEntriesInToolWindow(
     }
 }
 
+private fun showReportInToolWindow(
+    project: Project,
+    title: String,
+    subtitle: String,
+    content: String,
+    artifactPath: Path,
+    onRefresh: (() -> Unit)? = null,
+) {
+    val toolWindow = toolWindowManager(project)?.getToolWindow(TOOL_WINDOW_ID)
+    if (toolWindow == null) {
+        openArtifact(project, artifactPath)
+        return
+    }
+
+    toolWindow.show {
+        ensureToolWindowPanel(project, toolWindow).renderReport(title, subtitle, content, artifactPath, onRefresh)
+    }
+}
+
 private fun selectedFile(project: Project): VirtualFile? =
     FileEditorManager.getInstance(project).selectedFiles.firstOrNull()
 
@@ -539,6 +604,38 @@ private fun loadCurrentFileEntries(project: Project, virtualFile: VirtualFile): 
     return parseResults(payload)
 }
 
+private fun discoverWorkspaceLensmaps(project: Project): List<String> {
+    val root = projectRoot(project) ?: return emptyList()
+    Files.walk(root).use { stream ->
+        return stream
+            .filter { it.isRegularFile() }
+            .filter { path ->
+                val relative = root.relativize(path).toString().replace('\\', '/')
+                if (relative.startsWith(".git/")
+                    || relative.startsWith("node_modules/")
+                    || relative.startsWith("target/")
+                    || relative.startsWith("artifacts/")
+                    || relative.startsWith("local/state/")
+                ) {
+                    return@filter false
+                }
+                val name = path.fileName.toString()
+                name == "lensmap.json" || name.endsWith(".lensmap.json")
+            }
+            .map { root.relativize(it).toString().replace('\\', '/') }
+            .sorted()
+            .distinct()
+            .collect(Collectors.toList())
+    }
+}
+
+private fun reportArtifactPath(project: Project, filename: String): Path {
+    val root = projectRoot(project) ?: error(t("Project root is unavailable.", "无法获取项目根目录。"))
+    val dir = root.resolve("local/state/lensmap/jetbrains")
+    Files.createDirectories(dir)
+    return dir.resolve(filename)
+}
+
 private fun searchWorkspaceNotes(project: Project, query: String) {
     try {
         val payload = LensMapCli.run(project, listOf("search", "--query=$query", "--limit=80"))
@@ -551,6 +648,112 @@ private fun searchWorkspaceNotes(project: Project, query: String) {
         ) { searchWorkspaceNotes(project, query) }
     } catch (error: Throwable) {
         notify(project, error.message ?: t("LensMap search failed.", "LensMap 搜索失败。"), NotificationType.ERROR)
+    }
+}
+
+private fun showPolicyCheck(project: Project) {
+    val lensmaps = discoverWorkspaceLensmaps(project)
+    if (lensmaps.isEmpty()) {
+        notify(project, t("No LensMap files were found in this project.", "当前项目中未找到 LensMap 文件。"), NotificationType.WARNING)
+        return
+    }
+    val outputPath = reportArtifactPath(project, "policy-check.md")
+
+    try {
+        val payload = LensMapCli.run(
+            project,
+            listOf(
+                "policy",
+                "check",
+                "--lensmaps=${lensmaps.joinToString(",")}",
+                "--report-only",
+                "--out=${outputPath.toString().replace('\\', '/')}",
+            ),
+        )
+        val findings = payload.getAsJsonObject("findings")?.getAsJsonObject("summary")
+        val errors = findings?.get("error_count")?.asInt ?: 0
+        val warnings = findings?.get("warning_count")?.asInt ?: 0
+        val content = Files.readString(outputPath)
+        showReportInToolWindow(
+            project,
+            t("LensMap Policy Check", "LensMap 策略检查"),
+            t("${lensmaps.size} maps • $errors errors • $warnings warnings", "${lensmaps.size} 个映射 • $errors 个错误 • $warnings 个警告"),
+            content,
+            outputPath,
+        ) { showPolicyCheck(project) }
+        notify(project, t("LensMap policy check finished.", "LensMap 策略检查已完成。"))
+    } catch (error: Throwable) {
+        notify(project, error.message ?: t("LensMap policy check failed.", "LensMap 策略检查失败。"), NotificationType.ERROR)
+    }
+}
+
+private fun showWorkspaceSummary(project: Project) {
+    val lensmaps = discoverWorkspaceLensmaps(project)
+    if (lensmaps.isEmpty()) {
+        notify(project, t("No LensMap files were found in this project.", "当前项目中未找到 LensMap 文件。"), NotificationType.WARNING)
+        return
+    }
+    val outputPath = reportArtifactPath(project, "summary.md")
+
+    try {
+        val payload = LensMapCli.run(
+            project,
+            listOf(
+                "summary",
+                "--lensmaps=${lensmaps.joinToString(",")}",
+                "--out=${outputPath.toString().replace('\\', '/')}",
+            ),
+        )
+        val summary = payload.getAsJsonObject("summary")
+        val entries = summary?.get("entry_count")?.asInt ?: 0
+        val files = summary?.get("files_with_notes")?.asInt ?: 0
+        val stale = summary?.get("stale_entries")?.asInt ?: 0
+        val content = Files.readString(outputPath)
+        showReportInToolWindow(
+            project,
+            t("LensMap Summary", "LensMap 汇总"),
+            t("$entries notes • $files files • $stale stale", "$entries 条注释 • $files 个文件 • $stale 条过期"),
+            content,
+            outputPath,
+        ) { showWorkspaceSummary(project) }
+        notify(project, t("LensMap summary rendered.", "LensMap 汇总已生成。"))
+    } catch (error: Throwable) {
+        notify(project, error.message ?: t("LensMap summary failed.", "LensMap 汇总失败。"), NotificationType.ERROR)
+    }
+}
+
+private fun showPrReport(project: Project) {
+    val lensmaps = discoverWorkspaceLensmaps(project)
+    if (lensmaps.isEmpty()) {
+        notify(project, t("No LensMap files were found in this project.", "当前项目中未找到 LensMap 文件。"), NotificationType.WARNING)
+        return
+    }
+    val outputPath = reportArtifactPath(project, "pr-report.md")
+
+    try {
+        val payload = LensMapCli.run(
+            project,
+            listOf(
+                "pr",
+                "report",
+                "--lensmaps=${lensmaps.joinToString(",")}",
+                "--out=${outputPath.toString().replace('\\', '/')}",
+            ),
+        )
+        val entryCount = payload.get("entry_count")?.asInt ?: 0
+        val uncovered = payload.getAsJsonArray("uncovered_files")?.size() ?: 0
+        val stale = payload.getAsJsonArray("stale_refs")?.size() ?: 0
+        val content = Files.readString(outputPath)
+        showReportInToolWindow(
+            project,
+            t("LensMap PR Report", "LensMap PR 报告"),
+            t("$entryCount notes • $uncovered uncovered • $stale stale", "$entryCount 条注释 • $uncovered 个未覆盖 • $stale 条过期"),
+            content,
+            outputPath,
+        ) { showPrReport(project) }
+        notify(project, t("LensMap PR report rendered.", "LensMap PR 报告已生成。"))
+    } catch (error: Throwable) {
+        notify(project, error.message ?: t("LensMap PR report failed.", "LensMap PR 报告失败。"), NotificationType.ERROR)
     }
 }
 
@@ -645,6 +848,14 @@ private fun openLensmapFile(project: Project, entry: SearchEntry) {
     val path = root.resolve(lensmap)
     val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path) ?: run {
         notify(project, t("LensMap file could not be opened.", "无法打开对应的 LensMap 文件。"), NotificationType.ERROR)
+        return
+    }
+    OpenFileDescriptor(project, virtualFile, 0, 0).navigate(true)
+}
+
+private fun openArtifact(project: Project, artifactPath: Path) {
+    val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(artifactPath) ?: run {
+        notify(project, t("Report artifact could not be opened.", "无法打开报告产物。"), NotificationType.ERROR)
         return
     }
     OpenFileDescriptor(project, virtualFile, 0, 0).navigate(true)
@@ -753,6 +964,27 @@ class SearchWorkspaceNotesAction : AnAction() {
             return
         }
         searchWorkspaceNotes(project, query)
+    }
+}
+
+class RunPolicyCheckAction : AnAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        showPolicyCheck(project)
+    }
+}
+
+class ShowSummaryAction : AnAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        showWorkspaceSummary(project)
+    }
+}
+
+class ShowPrReportAction : AnAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        showPrReport(project)
     }
 }
 

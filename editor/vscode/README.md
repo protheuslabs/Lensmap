@@ -9,10 +9,12 @@ Minimal VS Code integration for LensMap.
 - Add a LensMap note at the cursor
 - Edit the LensMap note at the cursor or from a sidebar entry
 - Refresh the sidebar and search LensMap notes across the workspace
+- Run `policy check`, `summary`, and `pr report` from the sidebar or command palette
 - Inline end-of-line decorations for current-file notes
 - Dim `@lensmap-anchor` markers so they stay unobtrusive in normal editing
 - Inline code lenses for reading and editing notes on the current line
 - Hover on `@lensmap-anchor` and `@lensmap-ref`
+- Preview generated governance reports stored under `local/state/lensmap/vscode/`
 - Follows the VS Code UI language and supports English and Chinese
 - Supports JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin files
 
@@ -39,7 +41,9 @@ The packaged extension is written to `artifacts/lensmap-vscode-<version>.vsix`.
 - 显示当前文件的 LensMap 注释
 - 在光标位置添加 LensMap 注释
 - 在光标位置或侧边栏中编辑已有 LensMap 注释
+- 可从侧边栏或命令面板运行 `policy check`、`summary`、`pr report`
 - 弱化显示 `@lensmap-anchor`，并在代码行上提供查看/编辑用的 CodeLens
 - 支持 `@lensmap-anchor` 和 `@lensmap-ref` 的悬停查看
+- 会预览生成到 `local/state/lensmap/vscode/` 的治理报告
 - 自动跟随 VS Code 界面语言，支持英文和中文
 - 支持 JavaScript、TypeScript、Python、Rust、Go、Java、C、C++、C#、Kotlin 文件

@@ -17,6 +17,7 @@ LensMap 是一个与代码绑定的外部文档层。它通过稳定的函数锚
 - 支持构建仓库级索引，并通过 CLI 搜索 LensMap 条目
 - 内置策略化模板与协作元数据，可记录负责人、作者、审查状态、范围与标签
 - 支持面向 CI 的策略检查、仓库汇总与 PR 报告，无需依赖 GitHub API
+- `policy check` 默认会聚合仓库中发现的全部 LensMap 文件，并以最严格的联合规则执行治理检查
 - 将源码中的注释提取到 LensMap 文件
 - 将 LensMap 条目重新合并回源码
 - 生成便于阅读的 Markdown 侧边文档
@@ -52,9 +53,9 @@ lensmap search --index=demo/.lensmap-index.json --query="Why"
 lensmap template list
 lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --template=architecture --owner=platform --review-status=in_review
 lensmap policy init --lensmap=demo/lensmap.json --require-owner=true --require-template=true --require-review-status=true --stale-after-days=30
-lensmap policy check --lensmap=demo/lensmap.json
-lensmap summary --lensmaps=demo/lensmap.json --owner=platform --out=demo/lensmap-summary.md
-lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict
+lensmap policy check --fail-on-warnings
+lensmap summary --out=local/state/lensmap/summary.md
+lensmap pr report --strict --out=local/state/lensmap/pr-report.md
 lensmap sync --lensmap=demo/lensmap.json
 lensmap merge --lensmap=demo/lensmap.json
 lensmap unmerge --lensmap=demo/lensmap.json
@@ -95,8 +96,12 @@ LENSMAP_LANG=en lensmap validate --lensmap=demo/lensmap.json
 - 在代码行上显示用于查看/编辑注释的 CodeLens
 - `LensMap: Refresh Sidebar`
 - `LensMap: Search Workspace Notes`
+- `LensMap: Run Policy Check`
+- `LensMap: Show Workspace Summary`
+- `LensMap: Show PR Report`
 - 侧边栏条目可直接编辑
 - `@lensmap-anchor` / `@lensmap-ref` 悬停查看
+- 在 `local/state/lensmap/vscode/` 下生成并预览治理报告
 - 根据 VS Code 界面语言自动切换为英文或中文
 
 打包方式：
@@ -116,9 +121,13 @@ npm run package:vsix
 - 持久化 `LensMap` 工具窗口，带有结构化注释列表和详情面板
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
+- `LensMap > Run Policy Check`
+- `LensMap > Show Summary`
+- `LensMap > Show PR Report`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
 - 在工具窗口中打开源码位置、打开对应的 LensMap 文件、复制引用或注释内容、编辑所选注释
+- 在工具窗口中直接查看治理报告，报告产物写入 `local/state/lensmap/jetbrains/`
 - 英文/中文提示与通知
 
 构建方式：
@@ -135,5 +144,6 @@ cd editor/jetbrains
 - `template list`：列出内置或仓库自定义模板
 - `policy init`：把所有权、模板、审查状态、过期阈值等策略写入 LensMap 元数据
 - `policy check`：执行可用于 CI 的策略检查
+- `policy check --lensmaps=...`：在需要时只针对指定 LensMap 子集执行聚合检查
 - `summary`：输出仓库级 LensMap 汇总，并可写成 Markdown
 - `pr report`：根据 git diff 生成变更文件的注释覆盖、过期与未审查报告

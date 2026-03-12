@@ -408,6 +408,13 @@ struct PrReportRender<'a> {
     uncovered_files: &'a [String],
 }
 
+#[derive(Clone, Debug)]
+struct LoadedLensMapDoc {
+    lensmap: String,
+    path: PathBuf,
+    doc: LensMapDoc,
+}
+
 #[derive(Clone, Debug, Default)]
 struct ValidationFindings {
     errors: Vec<String>,
@@ -420,6 +427,8 @@ struct PolicyFinding {
     level: String,
     #[serde(rename = "ref")]
     ref_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lensmap: Option<String>,
     field: String,
     code: String,
     message: String,
@@ -816,6 +825,38 @@ fn policy_for_doc(doc: &LensMapDoc) -> PolicySettings {
         .cloned()
         .and_then(|value| serde_json::from_value::<PolicySettings>(value).ok())
         .unwrap_or_else(default_policy_settings)
+}
+
+fn aggregate_policy_settings<'a, I>(policies: I) -> PolicySettings
+where
+    I: IntoIterator<Item = &'a PolicySettings>,
+{
+    let mut aggregated = PolicySettings::default();
+    let mut stale_after_days = None::<i64>;
+    let mut required_patterns = BTreeMap::new();
+
+    for policy in policies {
+        aggregated.require_owner |= policy.require_owner;
+        aggregated.require_author |= policy.require_author;
+        aggregated.require_template |= policy.require_template;
+        aggregated.require_review_status |= policy.require_review_status;
+        if policy.stale_after_days > 0 {
+            stale_after_days = Some(match stale_after_days {
+                Some(current) => current.min(policy.stale_after_days),
+                None => policy.stale_after_days,
+            });
+        }
+        for pattern in &policy.required_patterns {
+            let normalized = pattern.trim();
+            if !normalized.is_empty() {
+                required_patterns.insert(normalized.to_string(), true);
+            }
+        }
+    }
+
+    aggregated.stale_after_days = stale_after_days.unwrap_or(0);
+    aggregated.required_patterns = required_patterns.keys().cloned().collect();
+    aggregated
 }
 
 fn store_policy(metadata: &mut Map<String, Value>, policy: &PolicySettings) {
@@ -1402,7 +1443,9 @@ fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string();
     Some(stdout)
 }
 
@@ -1431,6 +1474,24 @@ fn git_changed_files(root: &Path, base: &str, head: &str) -> Option<Vec<String>>
     Some(files.keys().cloned().collect())
 }
 
+fn parse_git_status_rel(raw_line: &str) -> Option<String> {
+    let line = raw_line.trim_end();
+    if line.len() < 4 {
+        return None;
+    }
+    let rel = line[3..]
+        .rsplit_once(" -> ")
+        .map(|(_, new_path)| new_path)
+        .unwrap_or(&line[3..])
+        .trim()
+        .replace('\\', "/");
+    if rel.is_empty() {
+        None
+    } else {
+        Some(rel)
+    }
+}
+
 fn git_worktree_changed_files(root: &Path) -> Vec<String> {
     let output = git_output(root, &["status", "--porcelain", "--untracked-files=all"]);
     let Some(output) = output.filter(|output| !output.trim().is_empty()) else {
@@ -1439,17 +1500,7 @@ fn git_worktree_changed_files(root: &Path) -> Vec<String> {
 
     let mut files = BTreeMap::new();
     for raw_line in output.lines() {
-        let line = raw_line.trim();
-        if line.len() < 4 {
-            continue;
-        }
-        let rel = line[3..]
-            .rsplit_once(" -> ")
-            .map(|(_, new_path)| new_path)
-            .unwrap_or(&line[3..])
-            .trim()
-            .replace('\\', "/");
-        if !rel.is_empty() {
+        if let Some(rel) = parse_git_status_rel(raw_line) {
             files.insert(rel, true);
         }
     }
@@ -5643,6 +5694,7 @@ fn render_counter_section(
     lines.push(String::new());
 }
 
+#[cfg(test)]
 fn collect_policy_findings(
     root: &Path,
     doc: &LensMapDoc,
@@ -5656,6 +5708,7 @@ fn collect_policy_findings(
             errors.push(PolicyFinding {
                 level: "error".to_string(),
                 ref_id: entry.ref_id.clone(),
+                lensmap: None,
                 field: "owner".to_string(),
                 code: "missing_owner".to_string(),
                 message: format!("Entry {} is missing an owner.", entry.ref_id),
@@ -5665,6 +5718,7 @@ fn collect_policy_findings(
             errors.push(PolicyFinding {
                 level: "error".to_string(),
                 ref_id: entry.ref_id.clone(),
+                lensmap: None,
                 field: "author".to_string(),
                 code: "missing_author".to_string(),
                 message: format!("Entry {} is missing an author.", entry.ref_id),
@@ -5674,6 +5728,7 @@ fn collect_policy_findings(
             errors.push(PolicyFinding {
                 level: "error".to_string(),
                 ref_id: entry.ref_id.clone(),
+                lensmap: None,
                 field: "template".to_string(),
                 code: "missing_template".to_string(),
                 message: format!("Entry {} is missing a template.", entry.ref_id),
@@ -5690,6 +5745,7 @@ fn collect_policy_findings(
             errors.push(PolicyFinding {
                 level: "error".to_string(),
                 ref_id: entry.ref_id.clone(),
+                lensmap: None,
                 field: "review_status".to_string(),
                 code: "missing_review_status".to_string(),
                 message: format!("Entry {} is missing a review status.", entry.ref_id),
@@ -5699,6 +5755,7 @@ fn collect_policy_findings(
             warnings.push(PolicyFinding {
                 level: "warning".to_string(),
                 ref_id: entry.ref_id.clone(),
+                lensmap: None,
                 field: "review_due_at".to_string(),
                 code: "stale_entry".to_string(),
                 message: format!("Entry {} is stale and should be reviewed.", entry.ref_id),
@@ -5731,6 +5788,7 @@ fn collect_policy_findings(
                 warnings.push(PolicyFinding {
                     level: "warning".to_string(),
                     ref_id: format!("policy:{}", pattern),
+                    lensmap: None,
                     field: "required_patterns".to_string(),
                     code: "pattern_matches_no_files".to_string(),
                     message: format!("Policy pattern '{}' matched no covered files.", pattern),
@@ -5752,6 +5810,7 @@ fn collect_policy_findings(
                 errors.push(PolicyFinding {
                     level: "error".to_string(),
                     ref_id: format!("policy:{}", pattern),
+                    lensmap: None,
                     field: "required_patterns".to_string(),
                     code: "required_pattern_missing_notes".to_string(),
                     message: format!(
@@ -5766,6 +5825,166 @@ fn collect_policy_findings(
     }
 
     (policy, errors, warnings)
+}
+
+fn collect_aggregated_policy_findings(
+    root: &Path,
+    docs: &[LoadedLensMapDoc],
+) -> (
+    PolicySettings,
+    Vec<PolicyFinding>,
+    Vec<PolicyFinding>,
+    Vec<Value>,
+) {
+    let policy_pairs = docs
+        .iter()
+        .map(|loaded| (loaded.lensmap.clone(), policy_for_doc(&loaded.doc)))
+        .collect::<Vec<_>>();
+    let aggregated_policy =
+        aggregate_policy_settings(policy_pairs.iter().map(|(_, policy)| policy));
+    let policy_sources = policy_pairs
+        .iter()
+        .map(|(lensmap, policy)| {
+            json!({
+                "lensmap": lensmap,
+                "policy": policy,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut errors = vec![];
+    let mut warnings = vec![];
+    let mut all_files = BTreeMap::new();
+    let mut noted_files = HashSet::new();
+
+    for loaded in docs {
+        for file in resolve_covers_to_files(root, &loaded.doc.covers) {
+            all_files.insert(file, true);
+        }
+        for entry in &loaded.doc.entries {
+            let lensmap = Some(loaded.lensmap.clone());
+            let file = entry.file.trim();
+            if !file.is_empty() {
+                noted_files.insert(file.to_string());
+            }
+
+            if aggregated_policy.require_owner
+                && entry.owner.as_deref().unwrap_or("").trim().is_empty()
+            {
+                errors.push(PolicyFinding {
+                    level: "error".to_string(),
+                    ref_id: entry.ref_id.clone(),
+                    lensmap: lensmap.clone(),
+                    field: "owner".to_string(),
+                    code: "missing_owner".to_string(),
+                    message: format!("Entry {} is missing an owner.", entry.ref_id),
+                });
+            }
+            if aggregated_policy.require_author
+                && entry.author.as_deref().unwrap_or("").trim().is_empty()
+            {
+                errors.push(PolicyFinding {
+                    level: "error".to_string(),
+                    ref_id: entry.ref_id.clone(),
+                    lensmap: lensmap.clone(),
+                    field: "author".to_string(),
+                    code: "missing_author".to_string(),
+                    message: format!("Entry {} is missing an author.", entry.ref_id),
+                });
+            }
+            if aggregated_policy.require_template
+                && entry.template.as_deref().unwrap_or("").trim().is_empty()
+            {
+                errors.push(PolicyFinding {
+                    level: "error".to_string(),
+                    ref_id: entry.ref_id.clone(),
+                    lensmap: lensmap.clone(),
+                    field: "template".to_string(),
+                    code: "missing_template".to_string(),
+                    message: format!("Entry {} is missing a template.", entry.ref_id),
+                });
+            }
+            if aggregated_policy.require_review_status
+                && entry
+                    .review_status
+                    .as_deref()
+                    .unwrap_or("")
+                    .trim()
+                    .is_empty()
+            {
+                errors.push(PolicyFinding {
+                    level: "error".to_string(),
+                    ref_id: entry.ref_id.clone(),
+                    lensmap: lensmap.clone(),
+                    field: "review_status".to_string(),
+                    code: "missing_review_status".to_string(),
+                    message: format!("Entry {} is missing a review status.", entry.ref_id),
+                });
+            }
+            if aggregated_policy.stale_after_days > 0
+                && entry_is_stale(entry, aggregated_policy.stale_after_days)
+            {
+                warnings.push(PolicyFinding {
+                    level: "warning".to_string(),
+                    ref_id: entry.ref_id.clone(),
+                    lensmap,
+                    field: "review_due_at".to_string(),
+                    code: "stale_entry".to_string(),
+                    message: format!("Entry {} is stale and should be reviewed.", entry.ref_id),
+                });
+            }
+        }
+    }
+
+    if !aggregated_policy.required_patterns.is_empty() {
+        let covered_files = all_files.keys().cloned().collect::<Vec<_>>();
+        for pattern in &aggregated_policy.required_patterns {
+            let matched = covered_files
+                .iter()
+                .filter(|file| wildcard_match(pattern, file))
+                .cloned()
+                .collect::<Vec<_>>();
+            if matched.is_empty() {
+                warnings.push(PolicyFinding {
+                    level: "warning".to_string(),
+                    ref_id: format!("policy:{}", pattern),
+                    lensmap: None,
+                    field: "required_patterns".to_string(),
+                    code: "pattern_matches_no_files".to_string(),
+                    message: format!("Policy pattern '{}' matched no covered files.", pattern),
+                });
+                continue;
+            }
+            let uncovered = matched
+                .iter()
+                .filter(|file| !noted_files.contains(*file))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !uncovered.is_empty() {
+                let preview = uncovered
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                errors.push(PolicyFinding {
+                    level: "error".to_string(),
+                    ref_id: format!("policy:{}", pattern),
+                    lensmap: None,
+                    field: "required_patterns".to_string(),
+                    code: "required_pattern_missing_notes".to_string(),
+                    message: format!(
+                        "Policy pattern '{}' matched files without LensMap notes: {}{}",
+                        pattern,
+                        preview,
+                        if uncovered.len() > 3 { ", ..." } else { "" }
+                    ),
+                });
+            }
+        }
+    }
+
+    (aggregated_policy, errors, warnings, policy_sources)
 }
 
 fn summary_stats(entries: &[SearchEntryRecord], stale_after_days: i64) -> SummaryStats {
@@ -5885,6 +6104,260 @@ fn render_summary_markdown(
     render_counter_section(&mut lines, "Templates", &stats.by_template, top);
     render_counter_section(&mut lines, "Review Status", &stats.by_review_status, top);
     render_counter_section(&mut lines, "Scopes", &stats.by_scope, top);
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn render_policy_markdown(payload: &Value) -> String {
+    let lensmaps = payload
+        .get("lensmaps")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let policy = payload.get("policy").cloned().unwrap_or_else(|| json!({}));
+    let policy_sources = payload
+        .get("policy_sources")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let findings = payload
+        .get("findings")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let validate = payload
+        .get("validate")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let stats = payload.get("stats").cloned().unwrap_or_else(|| json!({}));
+
+    let mut lines = vec![
+        format!("# {}", tr("LensMap Policy Check", "LensMap 策略检查")),
+        String::new(),
+        format!("- {}: {}", tr("LensMaps", "LensMap 数量"), lensmaps.len()),
+        format!(
+            "- {}: {}",
+            tr("Aggregation", "聚合策略"),
+            payload
+                .get("aggregation")
+                .and_then(Value::as_str)
+                .unwrap_or("strictest_union")
+        ),
+        format!(
+            "- {}: {}",
+            tr("Policy errors", "策略错误"),
+            findings
+                .get("summary")
+                .and_then(|value| value.get("error_count"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+        format!(
+            "- {}: {}",
+            tr("Policy warnings", "策略警告"),
+            findings
+                .get("summary")
+                .and_then(|value| value.get("warning_count"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+        format!(
+            "- {}: {}",
+            tr("Structural errors", "结构错误"),
+            validate
+                .get("summary")
+                .and_then(|value| value.get("error_count"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        ),
+        String::new(),
+        "## Policy".to_string(),
+        format!(
+            "- require_owner: {}",
+            policy
+                .get("require_owner")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        ),
+        format!(
+            "- require_author: {}",
+            policy
+                .get("require_author")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        ),
+        format!(
+            "- require_template: {}",
+            policy
+                .get("require_template")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        ),
+        format!(
+            "- require_review_status: {}",
+            policy
+                .get("require_review_status")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        ),
+        format!(
+            "- stale_after_days: {}",
+            policy
+                .get("stale_after_days")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+        ),
+    ];
+
+    let required_patterns = policy
+        .get("required_patterns")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if required_patterns.is_empty() {
+        lines.push("- required_patterns: []".to_string());
+    } else {
+        lines.push("- required_patterns:".to_string());
+        for pattern in required_patterns {
+            if let Some(pattern) = pattern.as_str() {
+                lines.push(format!("  - `{}`", pattern));
+            }
+        }
+    }
+    lines.push(String::new());
+
+    lines.push("## Policy Sources".to_string());
+    if policy_sources.is_empty() {
+        lines.push("- none".to_string());
+    } else {
+        for source in policy_sources {
+            let lensmap = source
+                .get("lensmap")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let source_policy = source.get("policy").cloned().unwrap_or_else(|| json!({}));
+            let stale = source_policy
+                .get("stale_after_days")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            lines.push(format!(
+                "- `{}` owner={} author={} template={} review={} stale={}",
+                lensmap,
+                source_policy
+                    .get("require_owner")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                source_policy
+                    .get("require_author")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                source_policy
+                    .get("require_template")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                source_policy
+                    .get("require_review_status")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                stale,
+            ));
+        }
+    }
+    lines.push(String::new());
+
+    let render_findings = |lines: &mut Vec<String>, title: &str, items: &[Value]| {
+        lines.push(format!("## {}", title));
+        if items.is_empty() {
+            lines.push("- none".to_string());
+            lines.push(String::new());
+            return;
+        }
+        for item in items {
+            let code = item
+                .get("code")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let ref_id = item.get("ref").and_then(Value::as_str).unwrap_or("?");
+            let lensmap = item
+                .get("lensmap")
+                .and_then(Value::as_str)
+                .map(|value| format!(" [{}]", value))
+                .unwrap_or_default();
+            let message = item
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("no message");
+            lines.push(format!("- `{}` `{}`{} {}", code, ref_id, lensmap, message));
+        }
+        lines.push(String::new());
+    };
+
+    let policy_errors = findings
+        .get("errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let policy_warnings = findings
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    render_findings(&mut lines, &tr("Policy Errors", "策略错误"), &policy_errors);
+    render_findings(
+        &mut lines,
+        &tr("Policy Warnings", "策略警告"),
+        &policy_warnings,
+    );
+
+    let structural_errors = validate
+        .get("errors")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let structural_warnings = validate
+        .get("warnings")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    lines.push(format!(
+        "## {}",
+        tr("Structural Validate Findings", "结构校验结果")
+    ));
+    lines.push(format!(
+        "- {}: {}",
+        tr("Errors", "错误"),
+        structural_errors.len()
+    ));
+    lines.push(format!(
+        "- {}: {}",
+        tr("Warnings", "警告"),
+        structural_warnings.len()
+    ));
+    lines.push(String::new());
+
+    lines.push("## Stats".to_string());
+    lines.push(format!(
+        "- lensmap_count: {}",
+        stats
+            .get("lensmap_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    ));
+    lines.push(format!(
+        "- cover_roots: {}",
+        stats
+            .get("cover_roots")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    ));
+    lines.push(format!(
+        "- anchors: {}",
+        stats.get("anchors").and_then(Value::as_u64).unwrap_or(0)
+    ));
+    lines.push(format!(
+        "- entries: {}",
+        stats.get("entries").and_then(Value::as_u64).unwrap_or(0)
+    ));
+    lines.push(String::new());
 
     format!("{}\n", lines.join("\n"))
 }
@@ -6036,45 +6509,106 @@ fn cmd_policy_init(root: &Path, args: &ParsedArgs) {
 }
 
 fn cmd_policy_check(root: &Path, args: &ParsedArgs) {
-    let lensmap_path = resolve_lensmap_path(root, args, None);
-    if !lensmap_path.exists() {
-        emit(
-            lensmap_missing_payload(root, "policy_check", &lensmap_path, args),
-            1,
-        );
+    let docs = resolve_policy_lensmap_docs(root, args);
+    let lensmaps = docs
+        .iter()
+        .map(|loaded| loaded.lensmap.clone())
+        .collect::<Vec<_>>();
+    let mut structural_errors = vec![];
+    let mut structural_warnings = vec![];
+    let mut dirty_lensmaps = vec![];
+    let mut total_covers = BTreeMap::new();
+    let mut total_anchors = 0usize;
+    let mut total_entries = 0usize;
+
+    for loaded in &docs {
+        total_anchors += loaded.doc.anchors.len();
+        total_entries += loaded.doc.entries.len();
+        for cover in &loaded.doc.covers {
+            total_covers.insert(cover.clone(), true);
+        }
+        let findings = validate_doc(root, &loaded.path, &loaded.doc);
+        if findings.lensmap_dirty {
+            dirty_lensmaps.push(loaded.lensmap.clone());
+        }
+        structural_errors.extend(findings.errors.into_iter().map(|finding| {
+            json!({
+                "lensmap": loaded.lensmap,
+                "finding": finding,
+            })
+        }));
+        structural_warnings.extend(findings.warnings.into_iter().map(|finding| {
+            json!({
+                "lensmap": loaded.lensmap,
+                "finding": finding,
+            })
+        }));
     }
 
-    let doc = load_doc(&lensmap_path, "group");
-    let structural = validate_doc(root, &lensmap_path, &doc);
-    let (policy, errors, warnings) = collect_policy_findings(root, &doc);
+    let (policy, errors, warnings, policy_sources) =
+        collect_aggregated_policy_findings(root, &docs);
+    let output_path = args.get("out").map(|out| resolve_from_root(root, out));
+    if let Some(output_path) = output_path.as_ref() {
+        if !is_within_root(root, output_path) {
+            emit(
+                json!({"ok": false, "error": "security_output_outside_root"}),
+                1,
+            );
+        }
+    }
     let fail_on_warnings = args.has("fail-on-warnings");
-    let ok = structural.errors.is_empty()
+    let report_only = args.has("report-only");
+    let ok = structural_errors.is_empty()
         && errors.is_empty()
         && (!fail_on_warnings || warnings.is_empty());
-    let out = json!({
+    let mut out = json!({
         "ok": ok,
         "type": "lensmap",
         "action": "policy_check",
-        "lensmap": normalize_relative(root, &lensmap_path),
+        "lensmap": if docs.len() == 1 { Some(lensmaps[0].clone()) } else { None::<String> },
+        "lensmaps": lensmaps,
+        "aggregation": "strictest_union",
         "policy": policy,
+        "policy_sources": policy_sources,
         "findings": {
             "errors": errors,
             "warnings": warnings,
+            "summary": {
+                "error_count": errors.len(),
+                "warning_count": warnings.len(),
+            }
         },
         "validate": {
-            "errors": structural.errors,
-            "warnings": structural.warnings,
-            "lensmap_dirty": structural.lensmap_dirty,
+            "errors": structural_errors,
+            "warnings": structural_warnings,
+            "dirty_lensmaps": dirty_lensmaps,
+            "summary": {
+                "error_count": structural_errors.len(),
+                "warning_count": structural_warnings.len(),
+            }
         },
         "stats": {
-            "covers": doc.covers.len(),
-            "anchors": doc.anchors.len(),
-            "entries": doc.entries.len(),
+            "lensmap_count": docs.len(),
+            "cover_roots": total_covers.len(),
+            "anchors": total_anchors,
+            "entries": total_entries,
         },
+        "report_only": report_only,
         "ts": now_iso(),
     });
+    if let Some(output_path) = output_path.as_ref() {
+        ensure_dir(output_path);
+        let markdown = render_policy_markdown(&out);
+        let _ = fs::write(output_path, markdown);
+        if let Some(obj) = out.as_object_mut() {
+            obj.insert(
+                "output".to_string(),
+                Value::String(normalize_relative(root, output_path)),
+            );
+        }
+    }
     append_history(root, &out);
-    emit(out, if ok { 0 } else { 1 });
+    emit(out, if ok || report_only { 0 } else { 1 });
 }
 
 fn cmd_summary(root: &Path, args: &ParsedArgs) {
@@ -6082,6 +6616,13 @@ fn cmd_summary(root: &Path, args: &ParsedArgs) {
     if lensmaps.is_empty() {
         emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
     }
+    let loaded_docs = load_repo_lensmap_docs(root, &lensmaps);
+    let policy_sources = loaded_docs
+        .iter()
+        .map(|loaded| (loaded.lensmap.clone(), policy_for_doc(&loaded.doc)))
+        .collect::<Vec<_>>();
+    let aggregated_policy =
+        aggregate_policy_settings(policy_sources.iter().map(|(_, policy)| policy));
 
     let file_filter = args
         .get("file")
@@ -6161,13 +6702,7 @@ fn cmd_summary(root: &Path, args: &ParsedArgs) {
         })
         .collect::<Vec<_>>();
 
-    let stale_after_days = lensmaps
-        .first()
-        .map(|lensmap| resolve_from_root(root, lensmap))
-        .map(|path| load_doc(&path, "group"))
-        .map(|doc| policy_for_doc(&doc).stale_after_days)
-        .unwrap_or_else(|| default_policy_settings().stale_after_days);
-    let stats = summary_stats(&entries, stale_after_days);
+    let stats = summary_stats(&entries, aggregated_policy.stale_after_days);
     let summary = summary_stats_to_value(&stats, top);
 
     let mut filters = Map::new();
@@ -6208,6 +6743,12 @@ fn cmd_summary(root: &Path, args: &ParsedArgs) {
         "type": "lensmap",
         "action": "summary",
         "lensmaps": lensmaps,
+        "aggregation": "strictest_union",
+        "policy": aggregated_policy,
+        "policy_sources": policy_sources
+            .iter()
+            .map(|(lensmap, policy)| json!({"lensmap": lensmap, "policy": policy}))
+            .collect::<Vec<_>>(),
         "changed_files": changed_files,
         "filters": filters,
         "summary": summary,
@@ -6223,6 +6764,13 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
     if lensmaps.is_empty() {
         emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
     }
+    let loaded_docs = load_repo_lensmap_docs(root, &lensmaps);
+    let policy_sources = loaded_docs
+        .iter()
+        .map(|loaded| (loaded.lensmap.clone(), policy_for_doc(&loaded.doc)))
+        .collect::<Vec<_>>();
+    let aggregated_policy =
+        aggregate_policy_settings(policy_sources.iter().map(|(_, policy)| policy));
 
     let explicit_range = args.get("base").is_some() || args.get("head").is_some();
     let base = args.get("base").unwrap_or("HEAD~1");
@@ -6265,12 +6813,6 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
         .into_iter()
         .filter(|entry| changed_set.contains(&entry.file))
         .collect::<Vec<_>>();
-    let stale_after_days = lensmaps
-        .first()
-        .map(|lensmap| resolve_from_root(root, lensmap))
-        .map(|path| load_doc(&path, "group"))
-        .map(|doc| policy_for_doc(&doc).stale_after_days)
-        .unwrap_or_else(|| default_policy_settings().stale_after_days);
 
     let mut grouped = BTreeMap::<String, Vec<SearchEntryRecord>>::new();
     let mut stale_refs = vec![];
@@ -6300,7 +6842,9 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
             created_at: None,
             source: None,
         };
-        if stale_after_days > 0 && entry_is_stale(&entry_record, stale_after_days) {
+        if aggregated_policy.stale_after_days > 0
+            && entry_is_stale(&entry_record, aggregated_policy.stale_after_days)
+        {
             stale_refs.push(entry.ref_id.clone());
         }
         if review_status.is_empty()
@@ -6369,6 +6913,12 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
         "type": "lensmap",
         "action": "pr_report",
         "lensmaps": lensmaps,
+        "aggregation": "strictest_union",
+        "policy": aggregated_policy,
+        "policy_sources": policy_sources
+            .iter()
+            .map(|(lensmap, policy)| json!({"lensmap": lensmap, "policy": policy}))
+            .collect::<Vec<_>>(),
         "source_kind": source_kind,
         "base": base,
         "head": head,
@@ -7760,6 +8310,53 @@ fn resolve_search_lensmap_paths(root: &Path, args: &ParsedArgs) -> Vec<String> {
     discover_lensmap_files(root, args.get("bundle-dir").unwrap_or(".lenspack"))
 }
 
+fn load_repo_lensmap_docs(root: &Path, lensmaps: &[String]) -> Vec<LoadedLensMapDoc> {
+    lensmaps
+        .iter()
+        .filter_map(|lensmap| {
+            let path = resolve_from_root(root, lensmap);
+            if !is_within_root(root, &path) || !path.exists() {
+                return None;
+            }
+            Some(LoadedLensMapDoc {
+                lensmap: normalize_relative(root, &path),
+                path: path.clone(),
+                doc: load_doc(&path, "group"),
+            })
+        })
+        .collect()
+}
+
+fn resolve_policy_lensmap_docs(root: &Path, args: &ParsedArgs) -> Vec<LoadedLensMapDoc> {
+    if args.get("lensmaps").is_some() {
+        let lensmaps = resolve_search_lensmap_paths(root, args);
+        if lensmaps.is_empty() {
+            emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+        }
+        return load_repo_lensmap_docs(root, &lensmaps);
+    }
+    if args.get("lensmap").is_none() {
+        let lensmaps = discover_lensmap_files(root, args.get("bundle-dir").unwrap_or(".lenspack"));
+        if lensmaps.is_empty() {
+            emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+        }
+        return load_repo_lensmap_docs(root, &lensmaps);
+    }
+
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "policy_check", &lensmap_path, args),
+            1,
+        );
+    }
+    vec![LoadedLensMapDoc {
+        lensmap: normalize_relative(root, &lensmap_path),
+        path: lensmap_path.clone(),
+        doc: load_doc(&lensmap_path, "group"),
+    }]
+}
+
 fn collect_doc_search_entries(
     root: &Path,
     lensmap_path: &Path,
@@ -8051,7 +8648,7 @@ fn usage() {
     println!("lensmap unpackage [--bundle-dir=.lenspack] [--on-missing=prompt|skip|error] [--map=old_dir=new_dir] [--overwrite] [--dry-run]");
     println!("lensmap validate [--lensmap=path]");
     println!("lensmap policy init [--lensmap=path] [--require-owner=true|false] [--require-author=true|false] [--require-template=true|false] [--require-review-status=true|false] [--stale-after-days=N] [--required-patterns=glob,glob]");
-    println!("lensmap policy check [--lensmap=path] [--fail-on-warnings]");
+    println!("lensmap policy check [--lensmap=path | --lensmaps=a,b] [--fail-on-warnings] [--report-only] [--out=path]  # aggregates all discovered LensMaps by default");
     println!("lensmap reanchor [--lensmap=path] [--dry-run]  # git-aware conflict protection on dirty overlaps");
     println!("lensmap render [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--out=path]");
     println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
@@ -8059,8 +8656,8 @@ fn usage() {
     println!("lensmap simplify [--lensmap=path]");
     println!("lensmap index [--lensmaps=a,b] [--index=path|--out=path]");
     println!("lensmap search --query=<text> [--lensmaps=a,b] [--index=path] [--file=path] [--symbol=name|path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--limit=N]");
-    println!("lensmap summary [--lensmaps=a,b] [--file=path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--base=rev --head=rev] [--top=N] [--out=path]");
-    println!("lensmap pr report [--lensmaps=a,b] [--base=rev --head=rev] [--strict] [--out=path]");
+    println!("lensmap summary [--lensmaps=a,b] [--file=path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--base=rev --head=rev] [--top=N] [--out=path]  # strictest policy aggregation across lensmaps");
+    println!("lensmap pr report [--lensmaps=a,b] [--base=rev --head=rev] [--strict] [--out=path]  # strictest policy aggregation across lensmaps");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
     println!("lensmap sync [--lensmap=path] [--to=path] [--index=path]  # reanchor + simplify + artifact refresh");
@@ -8426,6 +9023,22 @@ fn run(task: &str) -> bool {
     }
 
     #[test]
+    fn parse_git_status_rel_preserves_modified_and_renamed_paths() {
+        assert_eq!(
+            parse_git_status_rel(" M api/src/lib.rs"),
+            Some("api/src/lib.rs".to_string())
+        );
+        assert_eq!(
+            parse_git_status_rel("R  old/path.rs -> api/src/new.rs"),
+            Some("api/src/new.rs".to_string())
+        );
+        assert_eq!(
+            parse_git_status_rel("?? ui/src/view.ts"),
+            Some("ui/src/view.ts".to_string())
+        );
+    }
+
+    #[test]
     fn collect_policy_findings_requires_metadata_and_flags_stale_entries() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -8497,6 +9110,167 @@ fn run(task: &str) -> bool {
         assert!(errors
             .iter()
             .any(|finding| finding.code == "required_pattern_missing_notes"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn aggregate_policy_settings_uses_union_and_strictest_staleness() {
+        let first = PolicySettings {
+            require_owner: true,
+            require_author: false,
+            require_template: false,
+            require_review_status: false,
+            stale_after_days: 14,
+            required_patterns: vec!["src/*.rs".to_string()],
+        };
+        let second = PolicySettings {
+            require_owner: false,
+            require_author: true,
+            require_template: true,
+            require_review_status: false,
+            stale_after_days: 7,
+            required_patterns: vec!["src/*.rs".to_string(), "src/**/*.ts".to_string()],
+        };
+        let third = PolicySettings {
+            require_owner: false,
+            require_author: false,
+            require_template: false,
+            require_review_status: true,
+            stale_after_days: 0,
+            required_patterns: vec!["src/**/*.kt".to_string()],
+        };
+
+        let aggregated = aggregate_policy_settings([&first, &second, &third]);
+        let patterns = aggregated
+            .required_patterns
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
+
+        assert!(aggregated.require_owner);
+        assert!(aggregated.require_author);
+        assert!(aggregated.require_template);
+        assert!(aggregated.require_review_status);
+        assert_eq!(aggregated.stale_after_days, 7);
+        assert_eq!(patterns.len(), 3);
+        assert!(patterns.contains("src/*.rs"));
+        assert!(patterns.contains("src/**/*.ts"));
+        assert!(patterns.contains("src/**/*.kt"));
+    }
+
+    #[test]
+    fn aggregated_policy_findings_apply_union_across_multiple_lensmaps() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_policy_aggregate_{}", nonce));
+        let api_dir = root.join("api");
+        let ui_dir = root.join("ui");
+        fs::create_dir_all(&api_dir).unwrap();
+        fs::create_dir_all(&ui_dir).unwrap();
+        fs::write(api_dir.join("service.rs"), "fn run() {}\n").unwrap();
+        fs::write(ui_dir.join("view.ts"), "function render() {}\n").unwrap();
+
+        let mut api_doc = make_lensmap_doc("group", vec!["api".to_string()]);
+        store_policy(
+            &mut api_doc.metadata,
+            &PolicySettings {
+                require_owner: true,
+                stale_after_days: 30,
+                required_patterns: vec!["api/*.rs".to_string()],
+                ..default_policy_settings()
+            },
+        );
+        api_doc.entries.push(EntryRecord {
+            ref_id: "ABCDEF-1".to_string(),
+            file: "api/service.rs".to_string(),
+            text: Some("Runtime contract".to_string()),
+            ..EntryRecord::default()
+        });
+
+        let mut ui_doc = make_lensmap_doc("group", vec!["ui".to_string()]);
+        store_policy(
+            &mut ui_doc.metadata,
+            &PolicySettings {
+                require_template: true,
+                stale_after_days: 5,
+                required_patterns: vec!["ui/*.ts".to_string()],
+                ..default_policy_settings()
+            },
+        );
+        ui_doc.entries.push(EntryRecord {
+            ref_id: "FEDCBA-1".to_string(),
+            file: "ui/view.ts".to_string(),
+            text: Some("UX note".to_string()),
+            owner: Some("frontend".to_string()),
+            updated_at: Some(
+                (Utc::now() - Duration::days(12))
+                    .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            ..EntryRecord::default()
+        });
+
+        let docs = vec![
+            LoadedLensMapDoc {
+                lensmap: "api/lensmap.json".to_string(),
+                path: root.join("api/lensmap.json"),
+                doc: api_doc,
+            },
+            LoadedLensMapDoc {
+                lensmap: "ui/lensmap.json".to_string(),
+                path: root.join("ui/lensmap.json"),
+                doc: ui_doc,
+            },
+        ];
+
+        let (policy, errors, warnings, sources) = collect_aggregated_policy_findings(&root, &docs);
+        let error_codes = errors
+            .iter()
+            .map(|finding| {
+                (
+                    finding.ref_id.clone(),
+                    finding.code.clone(),
+                    finding.lensmap.clone(),
+                )
+            })
+            .collect::<HashSet<_>>();
+        let warning_codes = warnings
+            .iter()
+            .map(|finding| {
+                (
+                    finding.ref_id.clone(),
+                    finding.code.clone(),
+                    finding.lensmap.clone(),
+                )
+            })
+            .collect::<HashSet<_>>();
+
+        assert!(policy.require_owner);
+        assert!(policy.require_template);
+        assert_eq!(policy.stale_after_days, 5);
+        assert_eq!(sources.len(), 2);
+        assert!(error_codes.contains(&(
+            "ABCDEF-1".to_string(),
+            "missing_owner".to_string(),
+            Some("api/lensmap.json".to_string())
+        )));
+        assert!(error_codes.contains(&(
+            "ABCDEF-1".to_string(),
+            "missing_template".to_string(),
+            Some("api/lensmap.json".to_string())
+        )));
+        assert!(error_codes.contains(&(
+            "FEDCBA-1".to_string(),
+            "missing_template".to_string(),
+            Some("ui/lensmap.json".to_string())
+        )));
+        assert!(warning_codes.contains(&(
+            "FEDCBA-1".to_string(),
+            "stale_entry".to_string(),
+            Some("ui/lensmap.json".to_string())
+        )));
 
         let _ = fs::remove_dir_all(&root);
     }

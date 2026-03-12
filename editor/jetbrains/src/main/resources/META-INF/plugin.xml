@@ -3,7 +3,7 @@
   <name>LensMap</name>
   <vendor email="support@lensmap.dev" url="https://github.com/protheuslabs/Lensmap">protheuslabs</vendor>
   <description><![CDATA[
-    JetBrains note browser tool window and actions for showing, searching, annotating, editing, opening, and copying LensMap notes.
+    JetBrains note browser tool window and actions for showing, searching, annotating, editing, and reporting on LensMap notes.
   ]]></description>
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">
@@ -24,6 +24,18 @@
               class="dev.lensmap.jetbrains.SearchWorkspaceNotesAction"
               text="Search Workspace Notes"
               description="Search LensMap notes across the current project"/>
+      <action id="LensMap.RunPolicyCheck"
+              class="dev.lensmap.jetbrains.RunPolicyCheckAction"
+              text="Run Policy Check"
+              description="Run aggregated LensMap policy checks across the current project"/>
+      <action id="LensMap.ShowSummary"
+              class="dev.lensmap.jetbrains.ShowSummaryAction"
+              text="Show Summary"
+              description="Render the aggregated LensMap workspace summary"/>
+      <action id="LensMap.ShowPrReport"
+              class="dev.lensmap.jetbrains.ShowPrReportAction"
+              text="Show PR Report"
+              description="Render the aggregated LensMap PR report"/>
       <action id="LensMap.AnnotateAtCaret"
               class="dev.lensmap.jetbrains.AnnotateAtCaretAction"
               text="Add Note at Caret"
@@ -36,6 +48,9 @@
     <group id="LensMap.EditorPopupGroup" text="LensMap" popup="true">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <reference ref="LensMap.ShowFileNotes"/>
+      <reference ref="LensMap.RunPolicyCheck"/>
+      <reference ref="LensMap.ShowSummary"/>
+      <reference ref="LensMap.ShowPrReport"/>
       <reference ref="LensMap.AnnotateAtCaret"/>
       <reference ref="LensMap.EditNoteAtCaret"/>
     </group>

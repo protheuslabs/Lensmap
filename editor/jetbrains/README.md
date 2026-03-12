@@ -7,9 +7,13 @@ JetBrains integration for LensMap with a persistent note browser tool window.
 - `LensMap` tool window with a structured note list and detail pane
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
+- `LensMap > Run Policy Check`
+- `LensMap > Show Summary`
+- `LensMap > Show PR Report`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
 - Open the selected note in source, open the backing LensMap file, copy its ref or note text, and edit the selected entry from the tool window
+- Render governance reports inside the tool window and reopen the generated artifacts from `local/state/lensmap/jetbrains/`
 - English and Chinese prompts/notifications
 
 ## Build
