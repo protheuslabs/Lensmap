@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.5
+- Added AST-backed symbol/span detection for Go and Java, keeping regex fallback for degraded parses.
+- Added English/Chinese localization support to the CLI (`--lang=en|zh-CN` or `LENSMAP_LANG`), including localized help, prompts, and messages.
+- Localized the VS Code integration and extended it to Go and Java files.
+- Added a packageable VS Code extension workflow that produces a `.vsix` bundle from `editor/vscode`.
+
 ## 0.3.4
 - Added AST-backed symbol/span detection for JavaScript, TypeScript, Python, and Rust via tree-sitter, with regex fallback for unsupported or degraded parses.
 - Extended anchor records with symbol path and span metadata so resolution is less brittle when code moves.

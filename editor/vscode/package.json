@@ -1,15 +1,27 @@
 {
   "name": "lensmap-vscode",
-  "displayName": "LensMap",
-  "description": "Editor integration for LensMap code-linked documentation.",
-  "version": "0.1.0",
+  "displayName": "%lensmap.displayName%",
+  "description": "%lensmap.description%",
+  "version": "0.2.0",
   "publisher": "protheuslabs",
   "license": "MIT",
+  "homepage": "https://github.com/protheuslabs/Lensmap",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/protheuslabs/Lensmap.git",
+    "directory": "editor/vscode"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
   "categories": [
     "Other"
+  ],
+  "keywords": [
+    "lensmap",
+    "documentation",
+    "annotations",
+    "code-intelligence"
   ],
   "activationEvents": [
     "onCommand:lensmap.showFileNotes",
@@ -19,27 +31,43 @@
     "onLanguage:typescript",
     "onLanguage:typescriptreact",
     "onLanguage:python",
-    "onLanguage:rust"
+    "onLanguage:rust",
+    "onLanguage:go",
+    "onLanguage:java"
   ],
   "main": "./extension.js",
+  "files": [
+    "extension.js",
+    "package.json",
+    "package.nls.json",
+    "package.nls.zh-cn.json",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "package:vsix": "vsce package --out ../../artifacts/lensmap-vscode-${npm_package_version}.vsix"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.6.2"
+  },
   "contributes": {
     "commands": [
       {
         "command": "lensmap.showFileNotes",
-        "title": "LensMap: Show Notes for Current File"
+        "title": "%command.showFileNotes%"
       },
       {
         "command": "lensmap.annotateAtCursor",
-        "title": "LensMap: Add Note at Cursor"
+        "title": "%command.annotateAtCursor%"
       }
     ],
     "configuration": {
-      "title": "LensMap",
+      "title": "%lensmap.displayName%",
       "properties": {
         "lensmap.command": {
           "type": "string",
           "default": "",
-          "description": "Optional LensMap executable path. Leave empty to auto-detect local cargo-run or use lensmap on PATH."
+          "description": "%config.command.description%"
         },
         "lensmap.extraArgs": {
           "type": "array",
@@ -47,7 +75,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Additional arguments to prepend when invoking LensMap."
+          "description": "%config.extraArgs.description%"
         }
       }
     }

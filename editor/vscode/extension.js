@@ -10,7 +10,27 @@ const SUPPORTED_LANGUAGES = [
   "typescriptreact",
   "python",
   "rust",
+  "go",
+  "java",
 ];
+
+function isChineseLocale() {
+  return String(vscode.env.language || "").toLowerCase().startsWith("zh");
+}
+
+function t(en, zh) {
+  return isChineseLocale() ? zh : en;
+}
+
+function localizedKind(kind) {
+  const map = {
+    comment: t("comment", "注释"),
+    doc: t("doc", "文档"),
+    todo: t("todo", "待办"),
+    decision: t("decision", "决策"),
+  };
+  return map[kind] || kind || "comment";
+}
 
 function activate(context) {
   context.subscriptions.push(
@@ -29,7 +49,7 @@ function deactivate() {}
 async function showFileNotes() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    vscode.window.showErrorMessage("LensMap needs an active editor.");
+    vscode.window.showErrorMessage(t("LensMap needs an active editor.", "LensMap 需要一个当前激活的编辑器。"));
     return;
   }
 
@@ -49,14 +69,16 @@ async function showFileNotes() {
     const uri = vscode.Uri.file(outPath);
     await vscode.commands.executeCommand("markdown.showPreview", uri);
   } catch (error) {
-    vscode.window.showErrorMessage(`LensMap show failed: ${error.message}`);
+    vscode.window.showErrorMessage(
+      t(`LensMap show failed: ${error.message}`, `LensMap 显示失败：${error.message}`),
+    );
   }
 }
 
 async function annotateAtCursor() {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
-    vscode.window.showErrorMessage("LensMap needs an active editor.");
+    vscode.window.showErrorMessage(t("LensMap needs an active editor.", "LensMap 需要一个当前激活的编辑器。"));
     return;
   }
 
@@ -67,12 +89,17 @@ async function annotateAtCursor() {
 
   const symbol = await getSymbolAtCursor(editor);
   if (!symbol) {
-    vscode.window.showErrorMessage("LensMap could not resolve a function or method at the cursor.");
+    vscode.window.showErrorMessage(
+      t(
+        "LensMap could not resolve a function or method at the cursor.",
+        "LensMap 无法解析光标位置所在的函数或方法。",
+      ),
+    );
     return;
   }
 
   const text = await vscode.window.showInputBox({
-    prompt: `LensMap note for ${symbol.path}`,
+    prompt: t(`LensMap note for ${symbol.path}`, `为 ${symbol.path} 添加 LensMap 注释`),
     ignoreFocusOut: true,
   });
   if (!text || !text.trim()) {
@@ -80,9 +107,14 @@ async function annotateAtCursor() {
   }
 
   const kind = await vscode.window.showQuickPick(
-    ["comment", "doc", "todo", "decision"],
+    [
+      { label: localizedKind("comment"), value: "comment" },
+      { label: localizedKind("doc"), value: "doc" },
+      { label: localizedKind("todo"), value: "todo" },
+      { label: localizedKind("decision"), value: "decision" },
+    ],
     {
-      title: "LensMap note kind",
+      title: t("LensMap note kind", "LensMap 注释类型"),
       canPickMany: false,
       ignoreFocusOut: true,
     },
@@ -98,7 +130,7 @@ async function annotateAtCursor() {
     `--file=${ctx.relativeFile}`,
     `--symbol=${symbol.name}`,
     `--offset=${offset}`,
-    `--kind=${kind}`,
+    `--kind=${kind.value}`,
     `--text=${text.trim()}`,
   ];
   if (symbol.path && symbol.path !== symbol.name) {
@@ -107,9 +139,13 @@ async function annotateAtCursor() {
 
   try {
     await runLensmap(ctx.workspaceRoot, args);
-    vscode.window.showInformationMessage(`LensMap note added at ${symbol.path}.`);
+    vscode.window.showInformationMessage(
+      t(`LensMap note added at ${symbol.path}.`, `已在 ${symbol.path} 添加 LensMap 注释。`),
+    );
   } catch (error) {
-    vscode.window.showErrorMessage(`LensMap annotate failed: ${error.message}`);
+    vscode.window.showErrorMessage(
+      t(`LensMap annotate failed: ${error.message}`, `LensMap 注释失败：${error.message}`),
+    );
   }
 }
 
@@ -145,7 +181,7 @@ async function provideLensmapHover(document, position) {
       return undefined;
     }
     markdown.appendMarkdown(`**LensMap ${refId}**\n\n`);
-    markdown.appendMarkdown(`Kind: \`${entry.kind || "comment"}\`\n\n`);
+    markdown.appendMarkdown(`${t("Kind", "类型")}: \`${localizedKind(entry.kind || "comment")}\`\n\n`);
     markdown.appendText(entry.text || "");
     return new vscode.Hover(markdown);
   }
@@ -168,11 +204,11 @@ async function provideLensmapHover(document, position) {
   markdown.appendMarkdown(`**LensMap ${anchorId}**\n\n`);
   if (anchor) {
     const symbolPath = anchor.symbol_path || anchor.symbol || "?";
-    markdown.appendMarkdown(`Symbol: \`${symbolPath}\`\n\n`);
+    markdown.appendMarkdown(`${t("Symbol", "符号")}: \`${symbolPath}\`\n\n`);
   }
   if (entries.length > 0) {
     for (const entry of entries.slice(0, 5)) {
-      markdown.appendMarkdown(`- \`${entry.ref}\` ${entry.kind || "comment"}: `);
+      markdown.appendMarkdown(`- \`${entry.ref}\` ${localizedKind(entry.kind || "comment")}: `);
       markdown.appendText(entry.text || "");
       markdown.appendMarkdown("\n");
     }
@@ -183,13 +219,23 @@ async function provideLensmapHover(document, position) {
 async function resolveLensmapContext(uri) {
   const folder = vscode.workspace.getWorkspaceFolder(uri);
   if (!folder) {
-    vscode.window.showErrorMessage("LensMap needs the file to be inside an open workspace.");
+    vscode.window.showErrorMessage(
+      t(
+        "LensMap needs the file to be inside an open workspace.",
+        "LensMap 要求当前文件位于已打开的工作区中。",
+      ),
+    );
     return null;
   }
 
   const lensmapPath = await findLensmapForFile(uri, folder);
   if (!lensmapPath) {
-    vscode.window.showErrorMessage("LensMap could not find a lensmap.json for this file.");
+    vscode.window.showErrorMessage(
+      t(
+        "LensMap could not find a lensmap.json for this file.",
+        "LensMap 找不到当前文件对应的 lensmap.json。",
+      ),
+    );
     return null;
   }
 
@@ -316,7 +362,10 @@ async function runLensmap(workspaceRoot, args) {
 function resolveInvocation(workspaceRoot) {
   const config = vscode.workspace.getConfiguration("lensmap");
   const configuredCommand = String(config.get("command") || "").trim();
-  const extraArgs = Array.isArray(config.get("extraArgs")) ? config.get("extraArgs") : [];
+  const extraArgs = Array.isArray(config.get("extraArgs")) ? config.get("extraArgs").slice() : [];
+  if (!extraArgs.some((value) => String(value).startsWith("--lang=")) && isChineseLocale()) {
+    extraArgs.push("--lang=zh-CN");
+  }
   if (configuredCommand) {
     return {
       command: configuredCommand,

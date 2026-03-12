@@ -1,6 +1,8 @@
 
 # LensMap
 
+[中文文档](./README.zh-CN.md)
+
 <p align="center">
 <img width="800" height="450" alt="image" src="./ezgif-753b52dfe5e287da.gif" />
 </p>
@@ -12,9 +14,11 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 - Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
 - Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
 - Resolves anchors using source anchor ID first, then AST-backed symbol path and fingerprint metadata, then stored line/span hints.
+- Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, and Java.
 - Extracts inline/source comments into lens entries.
 - Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
 - Includes a minimal VS Code integration for show/annotate/hover workflows.
+- Supports English and Chinese in the CLI and editor integration.
 - Validates marker coherence, collisions, drift, and root-path safety.
 
 ## Positioning
@@ -57,6 +61,13 @@ git clone https://github.com/protheuslabs/Lensmap.git
 cd Lensmap
 cargo build --release
 ./target/release/lensmap --help
+```
+
+Force the CLI language if needed:
+
+```bash
+./target/release/lensmap --help --lang=zh-CN
+LENSMAP_LANG=en ./target/release/lensmap validate --lensmap=demo/lensmap.json
 ```
 
 ## Quick start
@@ -140,7 +151,7 @@ lensmap validate --lensmap=demo/lensmap.json
 ## Marker format by file type
 
 - Python: `# @lensmap-anchor ...` / `# @lensmap-ref ...`
-- JS/TS/Rust: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
+- JS/TS/Rust/Go/Java: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
 
 ## Workflow
 
@@ -173,8 +184,19 @@ Current capabilities:
 - `LensMap: Show Notes for Current File`
 - `LensMap: Add Note at Cursor`
 - hover support for `@lensmap-anchor` and `@lensmap-ref`
+- follows the VS Code UI language for English/Chinese prompts and messages
 
 The extension auto-detects a local LensMap repo and uses `cargo run -q -p lensmap -- ...` during development. Outside the repo, point it at an installed binary with the VS Code setting `lensmap.command`.
+
+### Package the extension
+
+```bash
+cd editor/vscode
+npm install
+npm run package:vsix
+```
+
+That writes a `.vsix` bundle to `artifacts/lensmap-vscode-<version>.vsix`.
 
 ## Packaging workflow
 

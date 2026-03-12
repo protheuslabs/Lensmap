@@ -22,7 +22,9 @@ const SKIP_PREFIXES: &[&str] = &[
     "local/state/",
     "local/private-lenses/",
 ];
-const SUPPORTED_EXTS: &[&str] = &[".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".py", ".rs"];
+const SUPPORTED_EXTS: &[&str] = &[
+    ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".java",
+];
 const PRESERVE_COMMENT_PREFIXES: &[&str] = &[
     "!/usr/bin/env",
     "!/bin/",
@@ -253,11 +255,221 @@ struct RenderFilters<'a> {
     kind: Option<&'a str>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UiLang {
+    En,
+    ZhCn,
+}
+
+impl UiLang {
+    fn code(self) -> &'static str {
+        match self {
+            UiLang::En => "en",
+            UiLang::ZhCn => "zh-CN",
+        }
+    }
+}
+
+fn parse_ui_lang(raw: &str) -> UiLang {
+    let normalized = raw.trim().to_lowercase().replace('_', "-");
+    if normalized.starts_with("zh") {
+        UiLang::ZhCn
+    } else {
+        UiLang::En
+    }
+}
+
+fn detect_ui_lang_from_process() -> UiLang {
+    for arg in env::args().skip(1) {
+        if let Some(raw) = arg.strip_prefix("--lang=") {
+            return parse_ui_lang(raw);
+        }
+    }
+    for key in ["LENSMAP_LANG", "LC_ALL", "LC_MESSAGES", "LANG"] {
+        if let Ok(value) = env::var(key) {
+            if !value.trim().is_empty() {
+                return parse_ui_lang(&value);
+            }
+        }
+    }
+    UiLang::En
+}
+
+fn ui_lang() -> UiLang {
+    static LANG: OnceLock<UiLang> = OnceLock::new();
+    *LANG.get_or_init(detect_ui_lang_from_process)
+}
+
+fn tr(en: &str, zh_cn: &str) -> String {
+    match ui_lang() {
+        UiLang::En => en.to_string(),
+        UiLang::ZhCn => zh_cn.to_string(),
+    }
+}
+
+fn localized_error_message(error: &str) -> Option<String> {
+    let message = match error {
+        "lensmap_missing" => tr(
+            "LensMap file was not found. Run init first or pass a real --lensmap path.",
+            "未找到 LensMap 文件。请先运行 init，或传入真实的 --lensmap 路径。",
+        ),
+        "invalid_anchor_mode" => tr(
+            "Invalid anchor mode. Use smart or all.",
+            "无效的锚点模式。请使用 smart 或 all。",
+        ),
+        "no_files_resolved" => tr(
+            "No source files matched the requested covers.",
+            "没有解析到符合 covers 的源码文件。",
+        ),
+        "annotate_requires_text" => tr(
+            "Annotate requires --text.",
+            "annotate 命令需要提供 --text。",
+        ),
+        "annotate_requires_ref_or_file_symbol" => tr(
+            "Annotate requires either --ref or --file with --symbol.",
+            "annotate 需要 --ref，或者同时提供 --file 和 --symbol。",
+        ),
+        "invalid_offset" => tr("Invalid --offset value.", "无效的 --offset 值。"),
+        "invalid_end_offset" => tr("Invalid --end-offset value.", "无效的 --end-offset 值。"),
+        "symbol_anchor_failed" => tr(
+            "LensMap could not resolve or create an anchor for the requested symbol.",
+            "LensMap 无法为请求的符号解析或创建锚点。",
+        ),
+        "invalid_ref" => tr(
+            "Invalid LensMap reference format.",
+            "无效的 LensMap 引用格式。",
+        ),
+        "entry_anchor_missing" => tr(
+            "The requested reference points to an anchor that does not exist.",
+            "请求的引用指向了不存在的锚点。",
+        ),
+        "file_required" => tr("A file path is required here.", "这里需要提供文件路径。"),
+        "security_entry_outside_root" => tr(
+            "The entry target is outside the repository root. Operation blocked.",
+            "目标条目位于仓库根目录之外。操作已阻止。",
+        ),
+        "invalid_kind" => tr(
+            "Invalid entry kind. Use comment, doc, todo, or decision.",
+            "无效的条目类型。请使用 comment、doc、todo 或 decision。",
+        ),
+        "invalid_mode" => tr(
+            "Invalid packaging mode. Use move or copy.",
+            "无效的打包模式。请使用 move 或 copy。",
+        ),
+        "security_bundle_outside_root" => tr(
+            "Bundle directory is outside the repository root. Operation blocked.",
+            "打包目录位于仓库根目录之外。操作已阻止。",
+        ),
+        "no_lensmap_files_found" => tr(
+            "No LensMap files were found to package.",
+            "没有找到可打包的 LensMap 文件。",
+        ),
+        "invalid_on_missing" => tr(
+            "Invalid --on-missing mode. Use prompt, skip, or error.",
+            "无效的 --on-missing 模式。请使用 prompt、skip 或 error。",
+        ),
+        "manifest_missing" => tr("Package manifest is missing.", "打包清单缺失。"),
+        "security_target_outside_root" => tr(
+            "Restore target is outside the repository root. Operation blocked.",
+            "恢复目标位于仓库根目录之外。操作已阻止。",
+        ),
+        "missing_dir_error" => tr(
+            "Original target directory is missing and --on-missing=error was selected.",
+            "原始目标目录不存在，并且选择了 --on-missing=error。",
+        ),
+        "security_prompt_target_outside_root" => tr(
+            "Prompt-provided target is outside the repository root. Operation blocked.",
+            "交互输入的目标位于仓库根目录之外。操作已阻止。",
+        ),
+        "target_exists_use_overwrite" => tr(
+            "Target already exists. Re-run with --overwrite to replace it.",
+            "目标已存在。如需覆盖，请重新运行并添加 --overwrite。",
+        ),
+        "from_required" => tr("Import requires --from.", "import 命令需要提供 --from。"),
+        _ if error.starts_with("copy_failed:") => tr(
+            "A file copy failed during packaging or unpackaging.",
+            "打包或解包过程中出现文件复制失败。",
+        ),
+        _ if error.starts_with("remove_source_failed:") => tr(
+            "A packaged source file could not be removed after copy.",
+            "复制完成后，无法移除原始打包文件。",
+        ),
+        _ => return None,
+    };
+    Some(message)
+}
+
+fn localized_action_message(action: &str) -> Option<String> {
+    let message = match action {
+        "init" => tr("LensMap initialized.", "LensMap 已初始化。"),
+        "template_add" => tr("Template created.", "模板已创建。"),
+        "scan" => tr("Anchor scan completed.", "锚点扫描已完成。"),
+        "extract_comments" => tr("Comments extracted into LensMap.", "注释已提取到 LensMap。"),
+        "merge" => tr(
+            "LensMap entries merged back into source files.",
+            "LensMap 条目已合并回源码文件。",
+        ),
+        "annotate" => tr("Annotation saved.", "注释已保存。"),
+        "package" => tr("LensMap files packaged.", "LensMap 文件已打包。"),
+        "unpackage" => tr(
+            "LensMap files restored from the package bundle.",
+            "LensMap 文件已从打包目录恢复。",
+        ),
+        "validate" => tr("Validation completed.", "校验已完成。"),
+        "reanchor" => tr("Anchor re-resolution completed.", "锚点重新解析已完成。"),
+        "render" => tr(
+            "Rendered Markdown view written.",
+            "渲染后的 Markdown 视图已写入。",
+        ),
+        "show" => tr(
+            "Filtered LensMap view written.",
+            "筛选后的 LensMap 视图已写入。",
+        ),
+        "simplify" => tr("LensMap document simplified.", "LensMap 文档已简化。"),
+        "polish" => tr("Polish artifacts refreshed.", "整理产物已刷新。"),
+        "import" => tr("Import receipt created.", "导入回执已创建。"),
+        "sync" => tr("LensMap sync completed.", "LensMap 同步已完成。"),
+        "expose" => tr(
+            "Lens exposed to the private store.",
+            "镜头已暴露到私有存储。",
+        ),
+        "status" => tr("Status collected.", "状态已收集。"),
+        _ => return None,
+    };
+    Some(message)
+}
+
+fn localize_payload(payload: &mut Value) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    obj.entry("lang".to_string())
+        .or_insert_with(|| Value::String(ui_lang().code().to_string()));
+    if obj.contains_key("message") {
+        return;
+    }
+    if let Some(error) = obj.get("error").and_then(Value::as_str) {
+        if let Some(message) = localized_error_message(error) {
+            obj.insert("message".to_string(), Value::String(message));
+        }
+        return;
+    }
+    if obj.get("ok").and_then(Value::as_bool) != Some(true) {
+        return;
+    }
+    if let Some(action) = obj.get("action").and_then(Value::as_str) {
+        if let Some(message) = localized_action_message(action) {
+            obj.insert("message".to_string(), Value::String(message));
+        }
+    }
+}
+
 fn now_iso() -> String {
     Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-fn emit(payload: Value, code: i32) -> ! {
+fn emit(mut payload: Value, code: i32) -> ! {
+    localize_payload(&mut payload);
     println!(
         "{}",
         serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
@@ -491,11 +703,14 @@ fn lensmap_missing_payload(
 ) -> Value {
     let raw = args.get("lensmap").unwrap_or("");
     let placeholder = looks_like_placeholder_path(raw);
-    let mut hint =
-        String::from("LensMap file was not found. Run init first or pass a real --lensmap path.");
+    let mut hint = tr(
+        "LensMap file was not found. Run init first or pass a real --lensmap path.",
+        "未找到 LensMap 文件。请先运行 init，或传入真实的 --lensmap 路径。",
+    );
     if placeholder {
-        hint = String::from(
+        hint = tr(
             "You passed a placeholder path literally (path/to/...). Replace it with a real path.",
+            "你直接传入了占位符路径（path/to/...）。请替换为真实路径。",
         );
     }
     json!({
@@ -862,6 +1077,26 @@ fn rs_fn_re() -> &'static Regex {
     })
 }
 
+fn go_fn_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*func\s*(?:\([^)]*\)\s*)?([A-Za-z_][\w]*)\s*\(").unwrap())
+}
+
+fn java_fn_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|final\s+|native\s+|synchronized\s+|abstract\s+|default\s+|strictfp\s+)*(?:<[^>]+>\s+)?[A-Za-z_][\w<>\[\], ?]*\s+([A-Za-z_][\w]*)\s*\([^;]*\)\s*\{").unwrap()
+    })
+}
+
+fn java_ctor_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(?:public\s+|private\s+|protected\s+)([A-Za-z_][\w]*)\s*\([^;]*\)\s*\{")
+            .unwrap()
+    })
+}
+
 fn line_indent(lines: &[String], line_index: usize) -> String {
     lines
         .get(line_index)
@@ -886,6 +1121,30 @@ fn path_with_symbol(scope: &[String], symbol: &str) -> String {
     let mut parts = scope.to_vec();
     parts.push(symbol.to_string());
     parts.join(".")
+}
+
+fn go_receiver_type_name(raw: &str) -> Option<String> {
+    let trimmed = raw
+        .trim()
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let candidate = trimmed.split_whitespace().last().unwrap_or("").trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    let candidate = candidate.trim_start_matches('*');
+    let candidate = candidate.trim_start_matches("[]");
+    let candidate = candidate.split('[').next().unwrap_or(candidate);
+    let candidate = candidate.rsplit('.').next().unwrap_or(candidate);
+    if candidate.is_empty() {
+        None
+    } else {
+        Some(candidate.to_string())
+    }
 }
 
 fn ast_scope_name(node: Node<'_>, source: &[u8], ext: &str) -> Option<String> {
@@ -913,6 +1172,16 @@ fn ast_scope_name(node: Node<'_>, source: &[u8], ext: &str) -> Option<String> {
                 .and_then(|child| node_text(child, source)),
             "impl_item" => node
                 .child_by_field_name("type")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".java" => match node.kind() {
+            "class_declaration"
+            | "interface_declaration"
+            | "enum_declaration"
+            | "record_declaration"
+            | "annotation_type_declaration" => node
+                .child_by_field_name("name")
                 .and_then(|child| node_text(child, source)),
             _ => None,
         },
@@ -962,6 +1231,18 @@ fn ast_function_hit(
                 .and_then(|child| node_text(child, source)),
             _ => None,
         },
+        ".go" => match node.kind() {
+            "function_declaration" | "method_declaration" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".java" => match node.kind() {
+            "method_declaration" | "constructor_declaration" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
         _ => None,
     }?;
 
@@ -969,11 +1250,27 @@ fn ast_function_hit(
     let normalized = normalize_fingerprint_text(&text);
     let start_line = node.start_position().row;
     let end_line = node.end_position().row.max(start_line);
+    let symbol_path = if ext == ".go" && node.kind() == "method_declaration" {
+        if let Some(receiver) = node
+            .child_by_field_name("receiver")
+            .and_then(|child| node_text(child, source))
+        {
+            if let Some(receiver_name) = go_receiver_type_name(&receiver) {
+                format!("{}.{}", receiver_name, symbol)
+            } else {
+                path_with_symbol(scope, &symbol)
+            }
+        } else {
+            path_with_symbol(scope, &symbol)
+        }
+    } else {
+        path_with_symbol(scope, &symbol)
+    };
     Some(FunctionHit {
         line_index: start_line,
         span_end_index: end_line,
         symbol: symbol.clone(),
-        symbol_path: path_with_symbol(scope, &symbol),
+        symbol_path,
         indent: line_indent(lines, start_line),
         fingerprint: hash_text(&normalized),
     })
@@ -987,6 +1284,8 @@ fn parser_for_extension(ext: &str) -> Option<Parser> {
         ".tsx" => tree_sitter_typescript::LANGUAGE_TSX.into(),
         ".py" => tree_sitter_python::LANGUAGE.into(),
         ".rs" => tree_sitter_rust::LANGUAGE.into(),
+        ".go" => tree_sitter_go::LANGUAGE.into(),
+        ".java" => tree_sitter_java::LANGUAGE.into(),
         _ => return None,
     };
     parser.set_language(&language).ok()?;
@@ -1099,6 +1398,19 @@ fn detect_functions_regex(lines: &[String], abs_file: &Path) -> Vec<FunctionHit>
         } else if ext == ".rs" {
             if let Some(c) = rs_fn_re().captures(line) {
                 symbol = c.get(1).map(|m| m.as_str().to_string());
+            }
+        } else if ext == ".go" {
+            if let Some(c) = go_fn_re().captures(line) {
+                symbol = c.get(1).map(|m| m.as_str().to_string());
+            }
+        } else if ext == ".java" {
+            if let Some(c) = java_fn_re().captures(line) {
+                symbol = c.get(1).map(|m| m.as_str().to_string());
+            }
+            if symbol.is_none() {
+                if let Some(c) = java_ctor_re().captures(line) {
+                    symbol = c.get(1).map(|m| m.as_str().to_string());
+                }
             }
         }
 
@@ -2315,7 +2627,10 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
                 "action": "scan",
                 "error": "no_files_resolved",
                 "covers": covers,
-                "hint": "No source files matched covers/files. Pass a real --covers value or run init first.",
+                "hint": tr(
+                    "No source files matched covers/files. Pass a real --covers value or run init first.",
+                    "没有源文件匹配 covers/files。请传入真实的 --covers 值，或先运行 init。",
+                ),
                 "examples": quickstart_examples(),
             }),
             1,
@@ -2492,7 +2807,10 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
                 "action": "extract_comments",
                 "error": "no_files_resolved",
                 "covers": covers,
-                "hint": "No source files matched covers/files. Pass a real --covers value or run init first.",
+                "hint": tr(
+                    "No source files matched covers/files. Pass a real --covers value or run init first.",
+                    "没有源文件匹配 covers/files。请传入真实的 --covers 值，或先运行 init。",
+                ),
                 "examples": quickstart_examples(),
             }),
             1,
@@ -2649,7 +2967,10 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
                 "type": "lensmap",
                 "action": "annotate",
                 "error": "annotate_requires_text",
-                "hint": "Use --text=<comment text> with either --ref=<HEX-start[-end]> or --file + --symbol.",
+                "hint": tr(
+                    "Use --text=<comment text> with either --ref=<HEX-start[-end]> or --file + --symbol.",
+                    "请配合 --ref=<HEX-start[-end]> 或 --file + --symbol 一起使用 --text=<comment text>。",
+                ),
                 "example": "lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text=\"why this exists\"",
             }),
             1,
@@ -2664,7 +2985,10 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
                     "type": "lensmap",
                     "action": "annotate",
                     "error": "annotate_requires_ref_or_file_symbol",
-                    "hint": "Use --ref=<HEX-start[-end]> or --file=<path> --symbol=<name> [--offset=1] [--end-offset=N].",
+                    "hint": tr(
+                        "Use --ref=<HEX-start[-end]> or --file=<path> --symbol=<name> [--offset=1] [--end-offset=N].",
+                        "请使用 --ref=<HEX-start[-end]>，或使用 --file=<path> --symbol=<name> [--offset=1] [--end-offset=N]。",
+                    ),
                 }),
                 1,
             );
@@ -2768,7 +3092,10 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
                     "action": "annotate",
                     "error": "entry_anchor_missing",
                     "anchor_id": parsed.anchor_id,
-                    "hint": "Run scan first so the anchor exists in lensmap.json, or annotate with --file + --symbol.",
+                    "hint": tr(
+                        "Run scan first so the anchor exists in lensmap.json, or annotate with --file + --symbol.",
+                        "请先运行 scan，让锚点进入 lensmap.json；或者使用 --file + --symbol 进行 annotate。",
+                    ),
                 }),
                 1,
             );
@@ -2788,7 +3115,10 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
                 "type": "lensmap",
                 "action": "annotate",
                 "error": "file_required",
-                "hint": "Pass --file=<path> or annotate against an anchor with a known file.",
+                "hint": tr(
+                    "Pass --file=<path> or annotate against an anchor with a known file.",
+                    "请传入 --file=<path>，或者针对已知文件的锚点执行 annotate。",
+                ),
             }),
             1,
         );
@@ -2918,7 +3248,10 @@ fn cmd_merge(root: &Path, args: &ParsedArgs) {
                 "action": "merge",
                 "error": "no_files_resolved",
                 "covers": covers,
-                "hint": "No files to merge. Ensure covers/entries reference real files.",
+                "hint": tr(
+                    "No files to merge. Ensure covers/entries reference real files.",
+                    "没有可合并的文件。请确认 covers/entries 引用了真实文件。",
+                ),
             }),
             1,
         );
@@ -3098,7 +3431,10 @@ fn cmd_package(root: &Path, args: &ParsedArgs) {
                 "type": "lensmap",
                 "action": "package",
                 "error": "no_lensmap_files_found",
-                "hint": "Create a lensmap first or pass --lensmaps=<file1,file2>.",
+                "hint": tr(
+                    "Create a lensmap first or pass --lensmaps=<file1,file2>.",
+                    "请先创建 lensmap，或传入 --lensmaps=<file1,file2>。",
+                ),
             }),
             1,
         );
@@ -3247,7 +3583,10 @@ fn cmd_unpackage(root: &Path, args: &ParsedArgs) {
                 "action": "unpackage",
                 "error": "manifest_missing",
                 "manifest": normalize_relative(root, &manifest_path),
-                "hint": "Run lensmap package first.",
+                "hint": tr(
+                    "Run lensmap package first.",
+                    "请先运行 lensmap package。",
+                ),
             }),
             1,
         );
@@ -3318,9 +3657,15 @@ fn cmd_unpackage(root: &Path, args: &ParsedArgs) {
                         .parent()
                         .map(to_posix_str)
                         .unwrap_or_else(|| ".".to_string());
-                    let prompt = format!(
-                        "Missing dir for {} ({}). Enter new directory path, or 'skip': ",
-                        item.original_path, parent_rel
+                    let prompt = tr(
+                        &format!(
+                            "Missing dir for {} ({}). Enter new directory path, or 'skip': ",
+                            item.original_path, parent_rel
+                        ),
+                        &format!(
+                            "{} 缺少目标目录（{}）。请输入新的目录路径，或输入 'skip' 跳过：",
+                            item.original_path, parent_rel
+                        ),
                     );
                     let response = prompt_line(&prompt);
                     if response.is_none() {
@@ -3939,28 +4284,42 @@ fn build_render_lines(
     lines.push(format!("# {}", title));
     lines.push(String::new());
     lines.push(format!(
-        "- Source: `{}`",
+        "- {} `{}`",
+        tr("Source:", "来源："),
         normalize_relative(root, lensmap_path)
     ));
-    lines.push(format!("- Generated: {}", now_iso()));
     lines.push(format!(
-        "- Positioning: {}",
+        "- {} {}",
+        tr("Generated:", "生成时间："),
+        now_iso()
+    ));
+    lines.push(format!(
+        "- {} {}",
+        tr("Positioning:", "定位："),
         doc.metadata
             .get("positioning")
             .and_then(Value::as_str)
             .unwrap_or("external-doc-layer")
     ));
     if let Some(file) = file_filter {
-        lines.push(format!("- File filter: `{}`", file));
+        lines.push(format!("- {} `{}`", tr("File filter:", "文件过滤："), file));
     }
     if let Some(symbol) = symbol_filter {
-        lines.push(format!("- Symbol filter: `{}`", symbol));
+        lines.push(format!(
+            "- {} `{}`",
+            tr("Symbol filter:", "符号过滤："),
+            symbol
+        ));
     }
     if let Some(ref_id) = &ref_filter {
-        lines.push(format!("- Ref filter: `{}`", ref_id));
+        lines.push(format!(
+            "- {} `{}`",
+            tr("Ref filter:", "引用过滤："),
+            ref_id
+        ));
     }
     if let Some(kind) = kind_filter {
-        lines.push(format!("- Kind filter: `{}`", kind));
+        lines.push(format!("- {} `{}`", tr("Kind filter:", "类型过滤："), kind));
     }
     lines.push(String::new());
 
@@ -4071,9 +4430,9 @@ fn build_render_lines(
 
         lines.push(format!("## {}", rel));
         lines.push(String::new());
-        lines.push("### Anchors".to_string());
+        lines.push(format!("### {}", tr("Anchors", "锚点")));
         if file_anchors.is_empty() {
-            lines.push("- none".to_string());
+            lines.push(format!("- {}", tr("none", "无")));
         } else {
             for anchor in &file_anchors {
                 let resolution = resolutions
@@ -4112,9 +4471,9 @@ fn build_render_lines(
         }
         lines.push(String::new());
 
-        lines.push("### Entries".to_string());
+        lines.push(format!("### {}", tr("Entries", "条目")));
         if file_entries.is_empty() {
-            lines.push("- none".to_string());
+            lines.push(format!("- {}", tr("none", "无")));
             lines.push(String::new());
             continue;
         }
@@ -4122,7 +4481,17 @@ fn build_render_lines(
         for (entry, anchor, resolution, start, end) in file_entries {
             entries_rendered += 1;
             let label = if let Some(start_line) = start {
-                if let Some(end_line) = end {
+                if ui_lang() == UiLang::ZhCn {
+                    if let Some(end_line) = end {
+                        if end_line != start_line {
+                            format!("第 {}-{} 行", start_line, end_line)
+                        } else {
+                            format!("第 {} 行", start_line)
+                        }
+                    } else {
+                        format!("第 {} 行", start_line)
+                    }
+                } else if let Some(end_line) = end {
                     if end_line != start_line {
                         format!("line {}-{}", start_line, end_line)
                     } else {
@@ -4132,7 +4501,7 @@ fn build_render_lines(
                     format!("line {}", start_line)
                 }
             } else {
-                "line ?".to_string()
+                tr("line ?", "第 ? 行")
             };
 
             lines.push(format!(
@@ -4207,7 +4576,7 @@ fn cmd_render(root: &Path, args: &ParsedArgs) {
             ref_id: None,
             kind: None,
         },
-        "LensMap Render",
+        &tr("LensMap Render", "LensMap 渲染视图"),
     );
 
     ensure_dir(&out_path);
@@ -4328,7 +4697,7 @@ fn cmd_show(root: &Path, args: &ParsedArgs) {
             ref_id: args.get("ref"),
             kind: args.get("kind"),
         },
-        "LensMap View",
+        &tr("LensMap View", "LensMap 视图"),
     );
     ensure_dir(&out_path);
     let _ = fs::write(&out_path, format!("{}\n", lines.join("\n")));
@@ -4379,7 +4748,7 @@ fn cmd_sync(root: &Path, args: &ParsedArgs) {
             ref_id: None,
             kind: None,
         },
-        "LensMap Render",
+        &tr("LensMap Render", "LensMap 渲染视图"),
     );
     ensure_dir(&out_path);
     let _ = fs::write(&out_path, format!("{}\n", lines.join("\n")));
@@ -4508,8 +4877,17 @@ fn cmd_status(root: &Path, args: &ParsedArgs) {
 }
 
 fn usage() {
+    println!("{}", tr("LensMap CLI", "LensMap 命令行"));
     println!(
-        "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path]"
+        "{}",
+        tr(
+            "Use --lang=en or --lang=zh-CN to force the interface language.",
+            "使用 --lang=en 或 --lang=zh-CN 可强制指定界面语言。",
+        )
+    );
+    println!();
+    println!(
+        "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path] [--lang=en|zh-CN]"
     );
     println!("lensmap annotate --lensmap=path (--ref=<HEX-start[-end]> | --file=path --symbol=name [--symbol-path=Outer.inner] [--offset=N] [--end-offset=M]) --text=<text> [--kind=comment|doc|todo|decision]");
     println!("lensmap template add <type>");
@@ -4535,7 +4913,7 @@ fn usage() {
     println!("lensmap expose --name=<lens_name>");
     println!("lensmap status [--lensmap=path]");
     println!();
-    println!("Quickstart:");
+    println!("{}", tr("Quickstart:", "快速开始："));
     println!("  lensmap init demo --mode=group --covers=demo/src");
     println!("  lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart");
     println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
@@ -4547,6 +4925,14 @@ fn usage() {
     println!("  lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt");
     println!("  lensmap sync --lensmap=demo/lensmap.json");
     println!("  lensmap validate --lensmap=demo/lensmap.json");
+    println!();
+    println!(
+        "{}",
+        tr(
+            "Supported AST languages: JavaScript, TypeScript, Python, Rust, Go, Java.",
+            "当前支持的 AST 语言：JavaScript、TypeScript、Python、Rust、Go、Java。",
+        )
+    );
 }
 
 fn main() {
@@ -4592,5 +4978,81 @@ fn main() {
             usage();
             std::process::exit(2);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn write_temp_source(ext: &str, stem: &str, body: &str) -> (PathBuf, Vec<String>) {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = env::temp_dir().join(format!("lensmap_tests_{}_{}", stem, nonce));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("{}{}", stem, ext));
+        fs::write(&path, body).unwrap();
+        let lines = split_lines(body);
+        (path, lines)
+    }
+
+    #[test]
+    fn parse_ui_lang_accepts_english_and_chinese() {
+        assert_eq!(parse_ui_lang("en_US.UTF-8"), UiLang::En);
+        assert_eq!(parse_ui_lang("zh-CN"), UiLang::ZhCn);
+        assert_eq!(parse_ui_lang("zh_TW"), UiLang::ZhCn);
+    }
+
+    #[test]
+    fn detect_functions_ast_supports_go_receivers() {
+        let source = r#"package demo
+
+type Runner struct{}
+
+func (r *Runner) Run() {
+}
+
+func Top() {
+}
+"#;
+        let (path, lines) = write_temp_source(".go", "sample", source);
+        let hits = detect_functions_ast(&lines, &path);
+        let paths = hits
+            .iter()
+            .map(|hit| hit.symbol_path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"Runner.Run".to_string()));
+        assert!(paths.contains(&"Top".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn detect_functions_ast_supports_java_class_paths() {
+        let source = r#"class Worker {
+    Worker() {
+    }
+
+    void run() {
+    }
+
+    class Inner {
+        void nested() {
+        }
+    }
+}
+"#;
+        let (path, lines) = write_temp_source(".java", "Worker", source);
+        let hits = detect_functions_ast(&lines, &path);
+        let paths = hits
+            .iter()
+            .map(|hit| hit.symbol_path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"Worker.Worker".to_string()));
+        assert!(paths.contains(&"Worker.run".to_string()));
+        assert!(paths.contains(&"Worker.Inner.nested".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
     }
 }
