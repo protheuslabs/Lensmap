@@ -448,6 +448,93 @@ struct SummaryStats {
     by_scope: BTreeMap<String, usize>,
 }
 
+#[derive(Serialize, Clone, Debug)]
+struct ImportProposal {
+    entry: EntryRecord,
+    confidence: f64,
+    reason: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct MetricHistoryPoint {
+    period: String,
+    generated_at: String,
+    metrics: Value,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct AutobotReceipt {
+    run_id: String,
+    action: String,
+    profile: String,
+    created_at: String,
+    updated_at: String,
+    source_root: String,
+    lensmap: String,
+    from: Vec<String>,
+    files_scanned: usize,
+    proposals_created: usize,
+    accepted: usize,
+    pending_review: usize,
+    conflicts: usize,
+    policy_mode: String,
+    policy_failures: Vec<String>,
+    applied: bool,
+    dry_run: bool,
+    checkpoint: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum AutobotProfile {
+    Conservative,
+    Standard,
+    Aggressive,
+}
+
+impl AutobotProfile {
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.unwrap_or("standard").trim().to_lowercase().as_str() {
+            "conservative" => Self::Conservative,
+            "aggressive" => Self::Aggressive,
+            _ => Self::Standard,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Conservative => "conservative",
+            Self::Standard => "standard",
+            Self::Aggressive => "aggressive",
+        }
+    }
+
+    fn acceptance_threshold(self) -> f64 {
+        match self {
+            Self::Conservative => 0.96,
+            Self::Standard => 0.86,
+            Self::Aggressive => 0.7,
+        }
+    }
+
+    fn conflict_tolerance(self) -> usize {
+        match self {
+            Self::Conservative => 0,
+            Self::Standard => 2,
+            Self::Aggressive => 4,
+        }
+    }
+
+    fn policy_mode(self) -> &'static str {
+        match self {
+            Self::Conservative => "strict",
+            Self::Standard => "standard",
+            Self::Aggressive => "permissive",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UiLang {
     En,
@@ -647,6 +734,8 @@ fn localized_action_message(action: &str) -> Option<String> {
             "镜头已暴露到私有存储。",
         ),
         "status" => tr("Status collected.", "状态已收集。"),
+        "metrics" => tr("LensMap metrics generated.", "LensMap 指标已生成。"),
+        "scorecard" => tr("LensMap scorecard generated.", "LensMap 评分卡已生成。"),
         _ => return None,
     };
     Some(message)
@@ -877,6 +966,12 @@ fn bool_from_flag(args: &ParsedArgs, key: &str, fallback: bool) -> bool {
 
 fn parse_i64_flag(args: &ParsedArgs, key: &str) -> Option<i64> {
     args.get(key).and_then(|raw| raw.trim().parse::<i64>().ok())
+}
+
+fn parse_f64_flag(args: &ParsedArgs, key: &str) -> Option<f64> {
+    args.get(key)
+        .and_then(|raw| raw.trim().parse::<f64>().ok())
+        .filter(|value| value.is_finite())
 }
 
 fn normalize_tags(tags: &[String]) -> Vec<String> {
@@ -7198,6 +7293,22 @@ fn default_show_output_path(lensmap_path: &Path) -> PathBuf {
     parent.join(format!("{}.show.md", stem))
 }
 
+fn default_autobot_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/autobot.json")
+}
+
+fn default_metric_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/metrics.json")
+}
+
+fn default_scorecard_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/scorecard.md")
+}
+
+fn default_metric_history_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/metric-history.jsonl")
+}
+
 fn render_filters_from_args<'a>(args: &'a ParsedArgs) -> RenderFilters<'a> {
     RenderFilters {
         file: args.get("file"),
@@ -7782,6 +7893,713 @@ fn cmd_polish(root: &Path) {
     emit(out, 0);
 }
 
+fn annotation_has_candidate_signal(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    if lower.len() < 12 {
+        return false;
+    }
+    [
+        "todo",
+        "fixme",
+        "warning",
+        "risk",
+        "hack",
+        "issue",
+        "review",
+        "TODO",
+        "FIXME",
+        "NOTE",
+        "NOTE:",
+    ]
+    .iter()
+    .any(|term| lower.contains(&term.to_lowercase()))
+}
+
+fn autobot_confidence_for_block(text: &str, kind: &str, profile: AutobotProfile) -> f64 {
+    let lower = text.to_lowercase();
+    let mut score = 0.36;
+    if lower.contains("todo") || lower.contains("fixme") {
+        score += 0.30;
+    }
+    if lower.contains("warning") || lower.contains("risk") {
+        score += 0.16;
+    }
+    if lower.contains("note:") || lower.contains("hack") {
+        score += 0.12;
+    }
+    if kind == "doc" {
+        score += 0.05;
+    }
+    if text.len() > 180 {
+        score += 0.05;
+    }
+    score = score.clamp(0.0, 1.0);
+    match profile {
+        AutobotProfile::Conservative => (score + 0.03).clamp(0.0, 1.0),
+        AutobotProfile::Standard => score,
+        AutobotProfile::Aggressive => (score - 0.05).clamp(0.0, 1.0),
+    }
+}
+
+fn synthetic_ref_id(file: &str, start: usize, end: usize) -> String {
+    let safe = file
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect::<String>();
+    let prefix = if safe.is_empty() { "file" } else { &safe };
+    format!("AUTO-{}-{}-{}", prefix, start + 1, end + 1)
+}
+
+fn collect_autobot_proposals(
+    root: &Path,
+    source_files: &[String],
+    doc: &LensMapDoc,
+    existing_keys: &mut HashSet<String>,
+    profile: AutobotProfile,
+) -> (Vec<ImportProposal>, Vec<Value>, usize, usize, usize) {
+    let mut proposals = vec![];
+    let mut conflicts = vec![];
+    let mut files_scanned = 0usize;
+    let mut filtered = 0usize;
+    let mut duplicates = 0usize;
+    let mut seen = HashSet::new();
+
+    for rel in source_files {
+        let abs = resolve_from_root(root, rel);
+        if !is_within_root(root, &abs) || !abs.exists() || abs.is_dir() {
+            continue;
+        }
+        let style = comment_style_for(&abs);
+        let lines = split_lines(&fs::read_to_string(&abs).unwrap_or_default());
+        if lines.is_empty() {
+            continue;
+        }
+        let anchor_nodes = collect_anchor_nodes(&lines, Some(style.line));
+        let anchor_lookup = materialize_anchors_for_file(root, &abs, &lines)
+            .into_iter()
+            .map(|anchor| (anchor.id.to_uppercase(), anchor))
+            .collect::<HashMap<_, _>>();
+        let blocks = collect_comment_blocks(&lines, &abs);
+        files_scanned = files_scanned.saturating_add(1);
+
+        for block in blocks {
+            let candidate = block.text.trim().to_string();
+            if !annotation_has_candidate_signal(&candidate) {
+                filtered = filtered.saturating_add(1);
+                continue;
+            }
+            let candidate_reason = if candidate.to_lowercase().contains("todo") {
+                "explicit_todo_marker"
+            } else if candidate.to_lowercase().contains("fixme") {
+                "explicit_fixme_marker"
+            } else {
+                "doc_annotation_signal"
+            };
+
+            let mut anchor_id = None::<String>;
+            let mut ref_id = String::new();
+            let maybe_latest = find_latest_anchor_for_line(&anchor_nodes, block.start);
+            if let Some((raw_anchor_id, _)) = maybe_latest {
+                let anchor_key = raw_anchor_id.to_uppercase();
+                if let Some(anchor) = anchor_lookup.get(&anchor_key) {
+                    let offsets = ref_offsets_for_block(anchor, None, block.start, block.end);
+                    if let Some((start, end)) = offsets {
+                        anchor_id = Some(anchor.id.clone());
+                        ref_id = if start == end {
+                            format!("{}-{}", anchor.id.to_uppercase(), start)
+                        } else {
+                            format!("{}-{}-{}", anchor.id.to_uppercase(), start, end)
+                        };
+                    }
+                }
+            }
+            if ref_id.is_empty() {
+                ref_id = synthetic_ref_id(rel, block.start, block.end);
+            }
+
+            let key = format!("{}::{}", rel, ref_id.to_uppercase());
+            if existing_keys.contains(&key) {
+                duplicates = duplicates.saturating_add(1);
+                conflicts.push(json!({
+                    "file": rel,
+                    "ref": ref_id,
+                    "reason": "already_implemented",
+                    "source": "autobot",
+                }));
+                continue;
+            }
+            if !seen.insert(key.clone()) {
+                duplicates = duplicates.saturating_add(1);
+                conflicts.push(json!({
+                    "file": rel,
+                    "ref": ref_id,
+                    "reason": "duplicate_candidate_in_run",
+                    "source": "autobot",
+                }));
+                continue;
+            }
+            existing_keys.insert(key.clone());
+
+            let confidence = autobot_confidence_for_block(&candidate, &block.kind, profile);
+            proposals.push(ImportProposal {
+                confidence,
+                reason: candidate_reason.to_string(),
+                entry: EntryRecord {
+                    ref_id,
+                    file: rel.clone(),
+                    anchor_id,
+                    kind: Some(if block.kind == "doc" {
+                        "doc".to_string()
+                    } else {
+                        "comment".to_string()
+                    }),
+                    text: Some(candidate),
+                    title: None,
+                    owner: None,
+                    author: None,
+                    scope: None,
+                    template: Some("knowledge-boilerplate".to_string()),
+                    review_status: None,
+                    review_due_at: None,
+                    updated_at: Some(now_iso()),
+                    tags: vec!["autobot".to_string(), profile.label().to_string()],
+                    created_at: None,
+                    source: Some("autobot".to_string()),
+                },
+            });
+        }
+    }
+
+    (proposals, conflicts, files_scanned, filtered, duplicates)
+}
+
+fn cmd_metrics(root: &Path, args: &ParsedArgs) {
+    let lensmaps = resolve_search_lensmap_paths(root, args);
+    if lensmaps.is_empty() {
+        emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+    }
+
+    let period = args.get("period").unwrap_or("run").trim();
+    let top = args.get("top").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100);
+    let generated_at = now_iso();
+    let snapshot = build_metric_snapshot(root, &lensmaps, top, period, &generated_at);
+
+    let out_path = args
+        .get("out")
+        .map(|path| resolve_from_root(root, path))
+        .unwrap_or_else(|| default_metric_output_path(root));
+    if !is_within_root(root, &out_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+    ensure_dir(&out_path);
+    let _ = fs::write(
+        &out_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&snapshot).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+    append_metric_history(root, period, &generated_at, &snapshot, &out_path);
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "metrics",
+        "period": period,
+        "top": top,
+        "lensmaps": lensmaps,
+        "output": normalize_relative(root, &out_path),
+        "snapshot": snapshot,
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_scorecard(root: &Path, args: &ParsedArgs) {
+    let lensmaps = resolve_search_lensmap_paths(root, args);
+    if lensmaps.is_empty() {
+        emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+    }
+
+    let period = args.get("period").unwrap_or("run").trim();
+    let top = args.get("top").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100);
+    let generated_at = now_iso();
+    let snapshot = build_metric_snapshot(root, &lensmaps, top, period, &generated_at);
+    let out_path = args
+        .get("out")
+        .map(|path| resolve_from_root(root, path))
+        .unwrap_or_else(|| default_scorecard_output_path(root));
+    if !is_within_root(root, &out_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+    ensure_dir(&out_path);
+    let health = snapshot.get("health").cloned().unwrap_or_else(|| json!({}));
+    let markdown = render_scorecard_markdown(
+        &tr("LensMap Scorecard", "LensMap 评分卡"),
+        &snapshot,
+        &health,
+        top,
+    );
+    let _ = fs::write(&out_path, markdown);
+    append_metric_history(root, period, &generated_at, &snapshot, &out_path);
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "scorecard",
+        "period": period,
+        "top": top,
+        "lensmaps": lensmaps,
+        "output": normalize_relative(root, &out_path),
+        "snapshot": snapshot,
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn resolve_import_source_files(root: &Path, raw: &str, fallback_covers: &[String]) -> Vec<String> {
+    if !raw.trim().is_empty() {
+        return resolve_covers_to_files(root, &[raw.to_string()]);
+    }
+    resolve_covers_to_files(root, fallback_covers)
+}
+
+fn render_scorecard_markdown(
+    title: &str,
+    snapshot: &Value,
+    health: &Value,
+    rows: usize,
+) -> String {
+    let period = snapshot.get("period").and_then(Value::as_str).unwrap_or("run");
+    let generated_at = snapshot
+        .get("generated_at")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let lensmaps = snapshot
+        .get("lensmaps")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rates = snapshot
+        .get("rates")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let totals = snapshot
+        .get("totals")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let stats = snapshot
+        .get("stats")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let policy = snapshot
+        .get("policy")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    let policy_findings = snapshot
+        .get("policy_findings")
+        .cloned()
+        .unwrap_or_else(|| json!({"errors": [], "warnings": []}));
+    let policy_errors = policy_findings
+        .get("errors")
+        .and_then(Value::as_array)
+        .map(|value| value.len())
+        .unwrap_or(0);
+    let policy_warnings = policy_findings
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|value| value.len())
+        .unwrap_or(0);
+
+    let metric_labels = |name: &str| match name {
+        "note_coverage_rate" => "Note coverage",
+        "stale_note_ratio" => "Stale notes",
+        "orphan_notes_rate" => "Orphan notes",
+        "no_owner_notes_rate" => "No owner notes",
+        "reviewed_rate" => "Reviewed",
+        "anchor_fidelity_rate" => "Anchor fidelity",
+        "policy_pass_rate" => "Policy pass",
+        _ => name,
+    };
+
+    let mut lines = vec![
+        format!("# {}", title),
+        String::new(),
+        format!("- {}", tr("Period:", "周期：")),
+        format!("- {}", period),
+        format!("- Generated: {}", generated_at),
+        format!("- LensMaps: {}", lensmaps.len()),
+        String::new(),
+    ];
+
+    lines.push("## Health and Trends".to_string());
+    if rates.is_empty() {
+        lines.push("- no_rates".to_string());
+    } else {
+        for row in rates.iter().take(rows.max(1)) {
+            let name = row.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let value = row.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+            let trend = row.get("trend").and_then(Value::as_str).unwrap_or("n/a");
+            let status = health
+                .get(name)
+                .and_then(|value| value.get("status"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            lines.push(format!(
+                "- {}: {:.2} [{}] [{}]",
+                metric_labels(name),
+                value,
+                status,
+                trend
+            ));
+        }
+    }
+    lines.push(String::new());
+
+    lines.push("## Totals".to_string());
+    let total_fields = [
+        ("entry_count", "Entries"),
+        ("files_with_notes", "Files with notes"),
+        ("source_files", "Source files"),
+        ("stale_entries", "Stale entries"),
+        ("orphan_notes", "Orphan notes"),
+        ("unowned_notes", "No owner notes"),
+        ("reviewed_notes", "Reviewed notes"),
+        ("policy_checks", "Policy checks"),
+        ("policy_failures", "Policy failures"),
+        ("policy_pass_count", "Policy pass"),
+        ("lensmap_count", "LensMap docs"),
+        ("anchor_count", "Anchors"),
+    ];
+    for (key, label) in total_fields {
+        let value = totals.get(key).and_then(Value::as_u64).unwrap_or(0);
+        lines.push(format!("- {}: {}", label, value));
+    }
+    lines.push(String::new());
+
+    lines.push("## Policy".to_string());
+    lines.push(format!(
+        "- Policy checks: {} checks | {} errors | {} warnings",
+        totals.get("policy_checks").and_then(Value::as_u64).unwrap_or(0),
+        policy_errors,
+        policy_warnings,
+    ));
+    if !policy.is_null() {
+        let stale_after_days = policy
+            .get("stale_after_days")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let require_owner = policy
+            .get("require_owner")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let require_author = policy
+            .get("require_author")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let require_template = policy
+            .get("require_template")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let require_review_status = policy
+            .get("require_review_status")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        lines.push(format!("- Stale after days: {}", stale_after_days));
+        lines.push(format!("- Require owner: {}", require_owner));
+        lines.push(format!("- Require author: {}", require_author));
+        lines.push(format!("- Require template: {}", require_template));
+        lines.push(format!("- Require review status: {}", require_review_status));
+    }
+    lines.push(String::new());
+
+    lines.push("## Stats".to_string());
+    let counter_sections = [
+        ("Top files", "by_file"),
+        ("Top directories", "by_directory"),
+        ("Top owners", "by_owner"),
+        ("Top kinds", "by_kind"),
+        ("Top templates", "by_template"),
+        ("Top review_status", "by_review_status"),
+        ("Top scopes", "by_scope"),
+    ];
+    for (section, key) in counter_sections {
+        lines.push(format!("### {}", section));
+        let rows_value = stats.get(key).and_then(Value::as_array).unwrap_or_default();
+        if rows_value.is_empty() {
+            lines.push("- none".to_string());
+            lines.push(String::new());
+            continue;
+        }
+        for item in rows_value.iter().take(rows.max(1)) {
+            let name = item.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let count = item.get("count").and_then(Value::as_u64).unwrap_or(0);
+            lines.push(format!("- `{}`: {}", name, count));
+        }
+        lines.push(String::new());
+    }
+
+    lines.push("## Age Distribution".to_string());
+    if let Some(distribution) = snapshot.get("age_distribution").and_then(Value::as_array) {
+        if distribution.is_empty() {
+            lines.push("- none".to_string());
+        } else {
+            for item in distribution.iter() {
+                let bucket = item.get("bucket").and_then(Value::as_str).unwrap_or("unknown");
+                let count = item.get("count").and_then(Value::as_u64).unwrap_or(0);
+                let share = item.get("share").and_then(Value::as_f64).unwrap_or(0.0);
+                lines.push(format!("- {}: {} ({:.2}%)", bucket, count, share));
+            }
+        }
+    } else {
+        lines.push("- none".to_string());
+    }
+
+    lines.push("## Health".to_string());
+    if let Some(obj) = health.as_object() {
+        for name in rows.max(1).min(obj.len()) {
+            let key = obj.keys().nth(name).unwrap_or(&"unknown");
+            if let Some(item) = obj.get(key) {
+                let status = item.get("status").and_then(Value::as_str).unwrap_or("unknown");
+                let value = item.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+                let green = item.get("green").and_then(Value::as_f64).unwrap_or(0.0);
+                let yellow = item.get("yellow").and_then(Value::as_f64).unwrap_or(0.0);
+                let higher_is_better = item
+                    .get("higher_is_better")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                lines.push(format!(
+                    "- {}: {} ({:.2}, green>= {:.2}, yellow>= {:.2}, higher_is_better={})",
+                    key, status, value, green, yellow, higher_is_better
+                ));
+            }
+        }
+    }
+
+    lines.join("\n") + "\n"
+}
+
+fn build_metric_rate_row(name: &str, value: f64, trend: &str) -> Value {
+    json!({
+        "name": name,
+        "value": clamp0_100(value),
+        "trend": trend,
+    })
+}
+
+fn cmd_autobot(root: &Path, args: &ParsedArgs) {
+    let profile = AutobotProfile::parse(args.get("profile"));
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "autobot", &lensmap_path, args),
+            1,
+        );
+    }
+    let from = args.get("from").unwrap_or("").trim().to_string();
+    let fallback_covers = vec![".".to_string()];
+    let source_files = if from.is_empty() {
+        let doc = load_doc(&lensmap_path, "group");
+        resolve_import_source_files(root, "", &doc.covers)
+    } else {
+        resolve_import_source_files(root, &from, &fallback_covers)
+    };
+    if source_files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "autobot",
+                "error": "no_files_resolved",
+                "from": from,
+                "resume": args.has("resume"),
+            }),
+            1,
+        );
+    }
+
+    let dry_run = args.has("dry-run");
+    let apply = args.has("apply");
+    let strict_policy = args.has("strict-policy") || profile == AutobotProfile::Conservative;
+    let run_id = if let Some(raw) = args.get("run-id") {
+        raw.to_string()
+    } else {
+        format!("autobot_{}", Utc::now().timestamp_millis())
+    };
+    let out_path = args
+        .get("out")
+        .map(|path| resolve_from_root(root, path))
+        .unwrap_or_else(|| default_autobot_output_path(root));
+    if !is_within_root(root, &out_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+    let checkpoint_path = args
+        .get("checkpoint")
+        .map(|path| resolve_from_root(root, path))
+        .unwrap_or_else(|| default_autobot_output_path(root));
+    if !is_within_root(root, &checkpoint_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+
+    let mut doc = load_doc(&lensmap_path, "group");
+    let mut existing_keys = doc
+        .entries
+        .iter()
+        .map(|entry| format!("{}::{}", entry.file, entry.ref_id.to_uppercase()))
+        .collect::<HashSet<_>>();
+
+    let (proposals, conflicts, files_scanned, filtered, duplicates) =
+        collect_autobot_proposals(root, &source_files, &doc, &mut existing_keys, profile);
+
+    let mut accepted = vec![];
+    let mut pending_review = vec![];
+    for proposal in proposals {
+        if proposal.confidence >= profile.acceptance_threshold() {
+            accepted.push(proposal);
+        } else {
+            pending_review.push(proposal);
+        }
+    }
+
+    let mut simulation = doc.clone();
+    for item in &accepted {
+        simulation.entries.push(item.entry.clone());
+    }
+    let (policy, errors, warnings, _) =
+        collect_aggregated_policy_findings(root, &[LoadedLensMapDoc {
+            lensmap: normalize_relative(root, &lensmap_path),
+            path: lensmap_path.clone(),
+            doc: simulation.clone(),
+        }]);
+    let policy_failure_count = errors.len() + warnings.len();
+    let mut policy_failures = vec![];
+    for item in errors.iter().chain(warnings.iter()) {
+        policy_failures.push(item.message.clone());
+    }
+
+    let mut applied = false;
+    let mut applied_count = 0usize;
+    let mut pending_count = pending_review.len();
+    if apply && !dry_run {
+        if strict_policy && policy_failure_count > 0 {
+            applied = false;
+        } else {
+            for item in accepted.iter() {
+                if conflicts.len() <= profile.conflict_tolerance() {
+                    doc.entries.push(item.entry.clone());
+                    applied_count = applied_count.saturating_add(1);
+                    applied = true;
+                } else {
+                    pending_count = pending_count.saturating_add(1);
+                }
+            }
+            if applied {
+                save_doc(&lensmap_path, doc.clone());
+            }
+        }
+    } else {
+        pending_count = pending_count.saturating_add(accepted.len());
+        applied_count = 0;
+    }
+
+    let receipt = AutobotReceipt {
+        run_id: run_id.clone(),
+        action: "autobot".to_string(),
+        profile: profile.label().to_string(),
+        created_at: now_iso(),
+        updated_at: now_iso(),
+        source_root: from.clone(),
+        lensmap: normalize_relative(root, &lensmap_path),
+        from: source_files.clone(),
+        files_scanned,
+        proposals_created: accepted.len() + pending_review.len(),
+        accepted: applied_count,
+        pending_review: pending_count,
+        conflicts: conflicts.len(),
+        policy_mode: profile.policy_mode().to_string(),
+        policy_failures,
+        applied,
+        dry_run,
+        checkpoint: Some(normalize_relative(root, &checkpoint_path)),
+    };
+
+    let _ = fs::write(
+        &checkpoint_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "run_id": run_id.clone(),
+                "action": "autobot",
+                "status": if dry_run { "dry_run" } else if applied { "applied" } else { "planned" },
+                "profile": profile.label(),
+                "source_files": source_files,
+                "applied_count": applied_count,
+                "pending_review": pending_count,
+            }))
+            .unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+
+    let output_metrics = json!({
+        "policy": policy,
+        "policy_file_count": files_scanned,
+        "policy_confidence": if profile == AutobotProfile::Conservative { "strict" } else if profile == AutobotProfile::Standard { "standard" } else { "permissive" },
+        "policy_failures": receipt.policy_failures,
+        "policy_sources": source_files,
+    });
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "autobot",
+        "run_id": run_id,
+        "profile": profile.label(),
+        "source": from,
+        "lensmap": normalize_relative(root, &lensmap_path),
+        "files_scanned": files_scanned,
+        "filtered_out": filtered,
+        "duplicates": duplicates,
+        "proposals": accepted.len() + pending_review.len(),
+        "accepted": accepted.len(),
+        "applied": applied_count,
+        "pending_review": pending_count,
+        "conflicts": conflicts,
+        "conflict_tolerance": profile.conflict_tolerance(),
+        "apply_requested": apply,
+        "dry_run": dry_run,
+        "strict_policy": strict_policy,
+        "snapshot": output_metrics,
+        "receipt": serde_json::to_value(&receipt).unwrap_or_else(|_| json!({})),
+        "out": normalize_relative(root, &out_path),
+        "checkpoint": normalize_relative(root, &checkpoint_path),
+        "ts": now_iso(),
+    });
+    let _ = fs::write(
+        &out_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+    append_history(root, &out);
+    emit(out, if applied { 0 } else if strict_policy && policy_failure_count > 0 { 1 } else { 0 });
+}
+
 fn cmd_import(root: &Path, args: &ParsedArgs) {
     let from = args
         .get("from")
@@ -7792,11 +8610,71 @@ fn cmd_import(root: &Path, args: &ParsedArgs) {
     if from.is_empty() {
         emit(json!({"ok": false, "error": "from_required"}), 1);
     }
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "import", &lensmap_path, args),
+            1,
+        );
+    }
+    let source_files = resolve_import_source_files(root, &from, &[".".to_string()]);
+    if source_files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "import",
+                "error": "no_files_resolved",
+                "from": from,
+            }),
+            1,
+        );
+    }
+    let dry_run = args.has("dry-run");
+    let apply = args.has("apply");
+    let profile = AutobotProfile::parse(args.get("profile"));
+    let mut doc = load_doc(&lensmap_path, "group");
+    let mut existing_keys = doc
+        .entries
+        .iter()
+        .map(|entry| format!("{}::{}", entry.file, entry.ref_id.to_uppercase()))
+        .collect::<HashSet<_>>();
+    let (proposals, conflicts, files_scanned, filtered, duplicates) =
+        collect_autobot_proposals(root, &source_files, &doc, &mut existing_keys, profile);
+    let mut accepted = vec![];
+    let mut pending_review = vec![];
+    for proposal in proposals {
+        if proposal.confidence >= profile.acceptance_threshold() {
+            accepted.push(proposal);
+        } else {
+            pending_review.push(proposal);
+        }
+    }
+
+    let mut imported_count = 0usize;
+    if apply && !dry_run {
+        for item in accepted {
+            doc.entries.push(item.entry);
+            imported_count = imported_count.saturating_add(1);
+        }
+        save_doc(&lensmap_path, doc.clone());
+    }
+
     let out = json!({
         "ok": true,
         "type": "lensmap",
         "action": "import",
         "from": from,
+        "lensmap": normalize_relative(root, &lensmap_path),
+        "files_scanned": files_scanned,
+        "filtered_out": filtered,
+        "duplicates": duplicates,
+        "conflicts": conflicts.len(),
+        "imported": imported_count,
+        "pending_review": pending_review.len(),
+        "profile": profile.label(),
+        "dry_run": dry_run,
+        "apply_requested": apply,
         "ts": now_iso(),
         "diff_receipt": format!("import_{}", Utc::now().timestamp_millis()),
     });
@@ -8323,8 +9201,380 @@ fn load_repo_lensmap_docs(root: &Path, lensmaps: &[String]) -> Vec<LoadedLensMap
                 path: path.clone(),
                 doc: load_doc(&path, "group"),
             })
-        })
-        .collect()
+    })
+    .collect()
+}
+
+fn read_history_rows(root: &Path, path: &Path) -> Vec<Value> {
+    if !path.exists() {
+        return vec![];
+    }
+    let mut out = vec![];
+    for raw in fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if let Ok(row) = serde_json::from_str::<Value>(raw) {
+            if let Some(path_value) = row.get("path").and_then(Value::as_str) {
+                if !is_within_root(root, &resolve_from_root(root, path_value)) {
+                    continue;
+                }
+            }
+            out.push(row);
+        }
+    }
+    out
+}
+
+fn as_f64_or_default(value: &Value) -> Option<f64> {
+    value.as_f64().or_else(|| value.as_u64().map(|v| v as f64)).or_else(|| {
+        value
+            .as_i64()
+            .and_then(|v| if v >= 0 { Some(v as f64) } else { None })
+    })
+}
+
+fn entry_record_from_search_entry(entry: &SearchEntryRecord) -> EntryRecord {
+    EntryRecord {
+        ref_id: entry.ref_id.clone(),
+        file: entry.file.clone(),
+        anchor_id: entry.anchor_id.clone(),
+        kind: entry.kind.clone(),
+        text: entry.text.clone(),
+        title: entry.title.clone(),
+        owner: entry.owner.clone(),
+        author: entry.author.clone(),
+        scope: entry.scope.clone(),
+        template: entry.template.clone(),
+        review_status: entry.review_status.clone(),
+        review_due_at: entry.review_due_at.clone(),
+        updated_at: entry.updated_at.clone(),
+        tags: entry.tags.clone(),
+        created_at: None,
+        source: entry.lensmap.clone().into(),
+    }
+}
+
+fn metric_rate_trend(current: f64, previous: Option<f64>) -> String {
+    let Some(previous) = previous else {
+        return "n/a".to_string();
+    };
+
+    let delta = current - previous;
+    if delta.abs() < 0.01 {
+        return "flat".to_string();
+    }
+    if delta > 0.0 {
+        format!("up +{:.2}", delta)
+    } else {
+        format!("down {:.2}", delta.abs())
+    }
+}
+
+fn extract_metric_rates(metrics: &Value) -> BTreeMap<String, f64> {
+    let mut out = BTreeMap::new();
+    let Some(rows) = metrics.get("rates").and_then(Value::as_array) else {
+        return out;
+    };
+    for row in rows {
+        let Some(name) = row.get("name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(value) = row.get("value").and_then(as_f64_or_default) else {
+            continue;
+        };
+        out.insert(name.to_string(), clamp0_100(value));
+    }
+    out
+}
+
+fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
+    let history_path = default_metric_history_path(root);
+    let history = read_history_rows(root, &history_path);
+
+    let mut latest = None;
+    let mut latest_rates = BTreeMap::new();
+    for row in history {
+        if row.get("period").and_then(Value::as_str).unwrap_or("run") != period {
+            continue;
+        }
+        let Some(timestamp) = row
+            .get("generated_at")
+            .and_then(Value::as_str)
+            .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+        else {
+            continue;
+        }
+        .with_timezone(&Utc);
+
+        if latest.is_none_or(|(prev, _)| timestamp > *prev) {
+            let snapshot = row
+                .get("snapshot")
+                .unwrap_or_else(|| row.get("metrics").unwrap_or(&row));
+            latest = Some((timestamp, snapshot.clone()));
+            latest_rates = extract_metric_rates(snapshot);
+        }
+    }
+
+    if latest.is_none() {
+        return BTreeMap::new();
+    }
+    let _ = latest;
+    latest_rates
+}
+
+fn append_metric_history(root: &Path, period: &str, generated_at: &str, metrics: &Value, out_path: &Path) {
+    let history_path = default_metric_history_path(root);
+    ensure_dir(&history_path);
+    let row = json!({
+        "period": period,
+        "generated_at": generated_at,
+        "output": normalize_relative(root, out_path),
+        "snapshot": metrics,
+    });
+    let mut existing = fs::read_to_string(&history_path).unwrap_or_default();
+    existing.push_str(&serde_json::to_string(&row).unwrap_or_else(|_| "{}".to_string()));
+    existing.push('\n');
+    let _ = fs::write(&history_path, existing);
+}
+
+fn metric_health_row(value: f64, green: f64, yellow: f64, higher_is_better: bool) -> Value {
+    json!({
+        "status": metric_band(value, green, yellow, higher_is_better),
+        "value": clamp0_100(value),
+        "green": green,
+        "yellow": yellow,
+        "higher_is_better": higher_is_better,
+    })
+}
+
+fn build_metric_snapshot(
+    root: &Path,
+    lensmaps: &[String],
+    top: usize,
+    period: &str,
+    generated_at: &str,
+) -> Value {
+    let loaded_docs = load_repo_lensmap_docs(root, lensmaps);
+    let policy_sources = loaded_docs
+        .iter()
+        .map(|loaded| (loaded.lensmap.clone(), policy_for_doc(&loaded.doc)))
+        .collect::<Vec<_>>();
+    let (policy, errors, warnings, _) =
+        collect_aggregated_policy_findings(root, &loaded_docs);
+    let entries = collect_repo_search_entries(root, lensmaps);
+    let stats = summary_stats(&entries, policy.stale_after_days);
+
+    let now = Utc::now();
+    let mut orphan_notes = 0usize;
+    let mut unowned_notes = 0usize;
+    let mut unreviewed_notes = 0usize;
+    let mut by_age_bucket: BTreeMap<String, usize> = BTreeMap::new();
+
+    for entry in &entries {
+        let entry_record = entry_record_from_search_entry(entry);
+        if entry_record
+            .anchor_id
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
+            orphan_notes = orphan_notes.saturating_add(1);
+        }
+        if entry_record.owner.as_ref().map(|value| value.trim().is_empty()).unwrap_or(true) {
+            unowned_notes = unowned_notes.saturating_add(1);
+        }
+
+        let review_status = entry_record
+            .review_status
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_lowercase();
+        if review_status.is_empty()
+            || review_status == "draft"
+            || review_status == "todo"
+            || review_status == "pending"
+            || review_status == "in_review"
+        {
+            unreviewed_notes = unreviewed_notes.saturating_add(1);
+        }
+
+        let bucket = entry_age_bucket(&entry_record, &now);
+        increment_counter(&mut by_age_bucket, bucket, "untracked");
+    }
+
+    let entry_count = entries.len();
+    let source_files = all_supported_files(root);
+    let total_source_files = source_files.len().max(1);
+    let reviewed_notes = entry_count.saturating_sub(unreviewed_notes);
+
+    let note_coverage_rate = percentage(stats.files_with_notes, total_source_files);
+    let stale_note_ratio = percentage(stats.stale_entries, entry_count);
+    let orphan_notes_rate = percentage(orphan_notes, entry_count);
+    let no_owner_notes_rate = percentage(unowned_notes, entry_count);
+    let reviewed_rate = percentage(reviewed_notes, entry_count);
+    let anchor_fidelity_rate = percentage(entry_count.saturating_sub(orphan_notes), entry_count);
+
+    let policy_failures = errors.len() + warnings.len();
+    let policy_checks = entry_count.max(loaded_docs.len()).max(1);
+    let policy_pass_count = policy_checks.saturating_sub(policy_failures.min(policy_checks));
+    let policy_pass_rate = percentage(policy_pass_count, policy_checks);
+
+    let previous_rates = latest_metric_rates(root, period);
+
+    let rates = vec![
+        build_metric_rate_row(
+            "note_coverage_rate",
+            note_coverage_rate,
+            &metric_rate_trend(note_coverage_rate, previous_rates.get("note_coverage_rate").copied()),
+        ),
+        build_metric_rate_row(
+            "stale_note_ratio",
+            stale_note_ratio,
+            &metric_rate_trend(stale_note_ratio, previous_rates.get("stale_note_ratio").copied()),
+        ),
+        build_metric_rate_row(
+            "orphan_notes_rate",
+            orphan_notes_rate,
+            &metric_rate_trend(orphan_notes_rate, previous_rates.get("orphan_notes_rate").copied()),
+        ),
+        build_metric_rate_row(
+            "no_owner_notes_rate",
+            no_owner_notes_rate,
+            &metric_rate_trend(no_owner_notes_rate, previous_rates.get("no_owner_notes_rate").copied()),
+        ),
+        build_metric_rate_row(
+            "reviewed_rate",
+            reviewed_rate,
+            &metric_rate_trend(reviewed_rate, previous_rates.get("reviewed_rate").copied()),
+        ),
+        build_metric_rate_row(
+            "anchor_fidelity_rate",
+            anchor_fidelity_rate,
+            &metric_rate_trend(
+                anchor_fidelity_rate,
+                previous_rates.get("anchor_fidelity_rate").copied(),
+            ),
+        ),
+        build_metric_rate_row(
+            "policy_pass_rate",
+            policy_pass_rate,
+            &metric_rate_trend(policy_pass_rate, previous_rates.get("policy_pass_rate").copied()),
+        ),
+    ];
+
+    let health = json!({
+        "note_coverage_rate": metric_health_row(note_coverage_rate, 75.0, 55.0, true),
+        "stale_note_ratio": metric_health_row(stale_note_ratio, 10.0, 20.0, false),
+        "orphan_notes_rate": metric_health_row(orphan_notes_rate, 5.0, 12.0, false),
+        "no_owner_notes_rate": metric_health_row(no_owner_notes_rate, 5.0, 12.0, false),
+        "reviewed_rate": metric_health_row(reviewed_rate, 80.0, 65.0, true),
+        "anchor_fidelity_rate": metric_health_row(anchor_fidelity_rate, 90.0, 80.0, true),
+        "policy_pass_rate": metric_health_row(policy_pass_rate, 95.0, 90.0, true),
+    });
+
+    let totals = json!({
+        "entry_count": entry_count,
+        "files_with_notes": stats.files_with_notes,
+        "source_files": total_source_files,
+        "stale_entries": stats.stale_entries,
+        "orphan_notes": orphan_notes,
+        "unowned_notes": unowned_notes,
+        "reviewed_notes": reviewed_notes,
+        "policy_checks": policy_checks,
+        "policy_failures": policy_failures,
+        "policy_pass_count": policy_pass_count,
+        "lensmap_count": lensmaps.len(),
+        "anchor_count": loaded_docs.iter().map(|loaded| loaded.doc.anchors.len()).sum::<usize>(),
+    });
+
+    let mut age_distribution = vec![];
+    for (bucket, count) in by_age_bucket {
+        age_distribution.push(json!({
+            "bucket": bucket,
+            "count": count,
+            "share": percentage(count, entry_count),
+        }));
+    }
+
+    let policy_sources_out = policy_sources
+        .iter()
+        .map(|(lensmap, policy)| json!({"lensmap": lensmap, "policy": policy}))
+        .collect::<Vec<_>>();
+
+    json!({
+        "period": period,
+        "generated_at": generated_at,
+        "lensmaps": lensmaps,
+        "aggregation": "strictest_union",
+        "policy": policy,
+        "policy_sources": policy_sources_out,
+        "policy_findings": {
+            "errors": errors,
+            "warnings": warnings,
+        },
+        "totals": totals,
+        "stats": summary_stats_to_value(&stats, top),
+        "rates": rates,
+        "health": health,
+        "age_distribution": age_distribution,
+    })
+}
+
+fn percentage(value: usize, total: usize) -> f64 {
+    if total == 0 {
+        0.0
+    } else {
+        (value as f64 / total as f64) * 100.0
+    }
+}
+
+fn metric_band(value: f64, green: f64, yellow: f64, higher_is_better: bool) -> &'static str {
+    if higher_is_better {
+        if value >= green {
+            "green"
+        } else if value >= yellow {
+            "yellow"
+        } else {
+            "red"
+        }
+    } else {
+        if value <= green {
+            "green"
+        } else if value <= yellow {
+            "yellow"
+        } else {
+            "red"
+        }
+    }
+}
+
+fn entry_age_bucket(entry: &EntryRecord, now: &DateTime<Utc>) -> &'static str {
+    let Some(updated) = entry_timestamp(entry) else {
+        return "untracked";
+    };
+    let delta = now.signed_duration_since(updated).num_days();
+    if delta < 0 {
+        return "future";
+    }
+    if delta <= 7 {
+        "0-7d"
+    } else if delta <= 30 {
+        "8-30d"
+    } else if delta <= 90 {
+        "31-90d"
+    } else if delta <= 365 {
+        "91-365d"
+    } else {
+        "365d+"
+    }
+}
+
+fn clamp0_100(value: f64) -> f64 {
+    value.clamp(0.0, 100.0)
 }
 
 fn resolve_policy_lensmap_docs(root: &Path, args: &ParsedArgs) -> Vec<LoadedLensMapDoc> {
@@ -8657,6 +9907,8 @@ fn usage() {
     println!("lensmap index [--lensmaps=a,b] [--index=path|--out=path]");
     println!("lensmap search --query=<text> [--lensmaps=a,b] [--index=path] [--file=path] [--symbol=name|path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--limit=N]");
     println!("lensmap summary [--lensmaps=a,b] [--file=path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--base=rev --head=rev] [--top=N] [--out=path]  # strictest policy aggregation across lensmaps");
+    println!("lensmap metrics [--lensmaps=a,b] [--bundle-dir=.lenspack] [--period=run] [--top=N] [--out=path]");
+    println!("lensmap scorecard [--lensmaps=a,b] [--bundle-dir=.lenspack] [--period=run] [--top=N] [--out=path]");
     println!("lensmap pr report [--lensmaps=a,b] [--base=rev --head=rev] [--strict] [--out=path]  # strictest policy aggregation across lensmaps");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
@@ -8676,6 +9928,12 @@ fn usage() {
     println!("  lensmap index --index=demo/.lensmap-index.json");
     println!("  lensmap search --index=demo/.lensmap-index.json --query=why");
     println!("  lensmap summary --lensmaps=demo/lensmap.json --owner=platform --out=demo/lensmap-summary.md");
+    println!(
+        "  lensmap metrics --lensmaps=demo/lensmap.json --period=run --out=demo/lensmap-metrics.json"
+    );
+    println!(
+        "  lensmap scorecard --lensmaps=demo/lensmap.json --period=run --out=demo/lensmap-scorecard.md"
+    );
     println!(
         "  lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict"
     );
@@ -8741,6 +9999,8 @@ fn main() {
         "index" => cmd_index(&root, &args),
         "search" => cmd_search(&root, &args),
         "summary" => cmd_summary(&root, &args),
+        "metrics" => cmd_metrics(&root, &args),
+        "scorecard" => cmd_scorecard(&root, &args),
         "pr" if args.positional.get(1).map(String::as_str) == Some("report") => {
             cmd_pr_report(&root, &args)
         }
