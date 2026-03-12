@@ -15,6 +15,8 @@ LensMap 是一个与代码绑定的外部文档层。它通过稳定的函数锚
 - 在 `validate` / `reanchor` 中加入基于 Git 的脏区重叠与双向编辑冲突保护
 - 支持 JavaScript、TypeScript、Python、Rust、Go、Java、C、C++、C#、Kotlin 的 AST 解析
 - 支持构建仓库级索引，并通过 CLI 搜索 LensMap 条目
+- 内置策略化模板与协作元数据，可记录负责人、作者、审查状态、范围与标签
+- 支持面向 CI 的策略检查、仓库汇总与 PR 报告，无需依赖 GitHub API
 - 将源码中的注释提取到 LensMap 文件
 - 将 LensMap 条目重新合并回源码
 - 生成便于阅读的 Markdown 侧边文档
@@ -47,6 +49,12 @@ lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run
 lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
 lensmap index --index=demo/.lensmap-index.json
 lensmap search --index=demo/.lensmap-index.json --query="Why"
+lensmap template list
+lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --template=architecture --owner=platform --review-status=in_review
+lensmap policy init --lensmap=demo/lensmap.json --require-owner=true --require-template=true --require-review-status=true --stale-after-days=30
+lensmap policy check --lensmap=demo/lensmap.json
+lensmap summary --lensmaps=demo/lensmap.json --owner=platform --out=demo/lensmap-summary.md
+lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict
 lensmap sync --lensmap=demo/lensmap.json
 lensmap merge --lensmap=demo/lensmap.json
 lensmap unmerge --lensmap=demo/lensmap.json
@@ -63,6 +71,11 @@ lensmap validate --lensmap=demo/lensmap.json
 lensmap --help --lang=zh-CN
 LENSMAP_LANG=en lensmap validate --lensmap=demo/lensmap.json
 ```
+
+## 规范与 Schema
+
+- Schema：`schema/lensmap.schema.v1.json`
+- 当前升级需求规格：`docs/LENSMAP_SRS.md`
 
 ## 文件中的注释格式
 
@@ -116,3 +129,11 @@ cd editor/jetbrains
 ```
 
 生成的插件 ZIP 位于 `editor/jetbrains/build/distributions/`。
+
+## 新增工作流命令
+
+- `template list`：列出内置或仓库自定义模板
+- `policy init`：把所有权、模板、审查状态、过期阈值等策略写入 LensMap 元数据
+- `policy check`：执行可用于 CI 的策略检查
+- `summary`：输出仓库级 LensMap 汇总，并可写成 Markdown
+- `pr report`：根据 git diff 生成变更文件的注释覆盖、过期与未审查报告

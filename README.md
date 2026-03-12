@@ -20,6 +20,8 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 - Adds git-aware validate/reanchor protection for dirty overlap and dual-edit conflict cases.
 - Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin.
 - Builds a searchable repo-wide note index and supports structured CLI search.
+- Adds policy-driven note templates and structured collaboration metadata for owners, review state, scope, and tags.
+- Supports CI-oriented policy checks, repo summaries, and PR reports without GitHub API coupling.
 - Extracts inline/source comments into lens entries.
 - Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
 - Includes VS Code sidebar, decorations, search, show/annotate, and hover workflows.
@@ -130,12 +132,14 @@ lensmap validate --lensmap=demo/lensmap.json
 - Canonical schema: `schema/lensmap.schema.v1.json`
 - Type: `lensmap`
 - Version: `1.0.0`
+- SRS for the current upgrade tranche: `docs/LENSMAP_SRS.md`
 
 ## Commands
 
 - `init`
 - `annotate`
 - `template add`
+- `template list`
 - `scan` (`--anchor-placement=inline|standalone`)
 - `extract-comments`
 - `unmerge` (alias of `extract-comments`)
@@ -143,16 +147,20 @@ lensmap validate --lensmap=demo/lensmap.json
 - `package` (collect lensmap files into one root bundle directory with a manifest map)
 - `unpackage` (restore packaged lensmap files back to original dirs, with `prompt|skip|error` handling for missing dirs)
 - `validate`
+- `policy init` (store repo policy such as required owners/templates/review status and stale thresholds)
+- `policy check` (CI-friendly validation against LensMap policy)
 - `reanchor` (git-aware dirty-overlap protection)
-- `render` (writes readable Markdown; defaults to a sibling `.md`)
+- `render` (writes readable Markdown; supports filtering by owner/template/review/scope/tag)
 - `parse` (alias of `render`)
-- `show` (filtered readable view by file, symbol, ref, or kind)
+- `show` (filtered readable view by file, symbol, ref, kind, owner, template, review, scope, or tag)
 - `simplify`
 - `index` (build a repo-wide `.lensmap-index.json`)
-- `search` (search repo notes live or through a saved index)
+- `search` (search repo notes live or through a saved index, including owner/template/review/scope/tag filters)
+- `summary` (repo-aware note rollups in JSON and optional Markdown)
+- `pr report` (git diff oriented report for changed files, stale notes, and missing-note coverage)
 - `polish`
 - `import`
-- `sync` (reanchor + simplify + render Markdown sidecar)
+- `sync` (reanchor + simplify + refresh canonical JSON, Markdown sidecar, and search index)
 - `expose`
 - `status`
 
@@ -173,15 +181,25 @@ lensmap extract-comments --lensmap=demo/lensmap.json
 # 3. Add more notes without touching raw ref IDs.
 lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="why this exists"
 
+# 3b. Or use a structured template with policy metadata.
+lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --template=architecture --owner=platform --review-status=in_review
+
+# 3c. Initialize repo policy for CI.
+lensmap policy init --lensmap=demo/lensmap.json --require-owner=true --require-template=true --require-review-status=true --stale-after-days=30
+
 # 4. Inspect one file or symbol.
 lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
 lensmap show --lensmap=demo/lensmap.json --symbol=run
 
-# 5. Reanchor drift, simplify the JSON, and refresh the Markdown sidecar.
+# 5. Reanchor drift, simplify the JSON, and refresh the Markdown sidecar + search index.
 lensmap sync --lensmap=demo/lensmap.json
+
+# 6. Summarize or report note coverage for CI/review.
+lensmap summary --lensmaps=demo/lensmap.json --owner=platform --out=demo/lensmap-summary.md
+lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict
 ```
 
-`render` and `sync` default to a Markdown file beside the JSON lensmap, so the machine-readable map stays canonical while the human-readable sidecar stays easy to open.
+`render` and `sync` default to a Markdown file beside the JSON lensmap, while `sync` also refreshes the repo search index. The canonical JSON stays authoritative, the Markdown sidecar stays human-readable, and the search index stays editor/repo-query friendly.
 
 ## Editor integration
 

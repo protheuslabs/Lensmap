@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.12
+- Added an explicit SRS for the knowledge-boilerplate tranche in `docs/LENSMAP_SRS.md`.
+- Added built-in template listing plus structured annotate metadata for owner, author, scope, tags, template, and review fields.
+- Added `policy init` and `policy check` for CI-oriented LensMap governance, including stale-note detection and required file-pattern coverage.
+- Added `summary` and `pr report` commands for repo rollups, optional Markdown output, and git-diff-based review reporting.
+- Extended `sync`, `status`, `render`, `show`, search indexing, and the canonical schema so the JSON, Markdown, and search-index artifact layers stay coherent.
+
 ## 0.3.11
 - Polished the JetBrains note browser so it retains the selected entry across refreshes instead of snapping back to the first note.
 - Added JetBrains tool-window actions to open the backing LensMap file directly and copy the selected note text.

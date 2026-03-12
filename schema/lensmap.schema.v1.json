@@ -55,7 +55,62 @@
       }
     },
     "metadata": {
-      "type": "object"
+      "type": "object",
+      "properties": {
+        "positioning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "boilerplate_scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "artifact_layers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "editor_anchor_visibility": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "require_owner": {
+              "type": "boolean"
+            },
+            "require_author": {
+              "type": "boolean"
+            },
+            "require_template": {
+              "type": "boolean"
+            },
+            "require_review_status": {
+              "type": "boolean"
+            },
+            "stale_after_days": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "required_patterns": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
     }
   },
   "additionalProperties": true,
@@ -189,6 +244,62 @@
             "string",
             "null"
           ]
+        },
+        "title": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "owner": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "template": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_status": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "review_due_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "updated_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         },
         "created_at": {
           "type": [

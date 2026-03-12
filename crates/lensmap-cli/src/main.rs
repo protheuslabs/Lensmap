@@ -1,4 +1,4 @@
-use chrono::Utc;
+use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -116,6 +116,24 @@ struct EntryRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_due_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     created_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     source: Option<String>,
@@ -161,6 +179,24 @@ struct SearchEntryRecord {
     kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    author: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_due_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    tags: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     symbol: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -312,6 +348,95 @@ struct RenderFilters<'a> {
     symbol: Option<&'a str>,
     ref_id: Option<&'a str>,
     kind: Option<&'a str>,
+    owner: Option<&'a str>,
+    template: Option<&'a str>,
+    review_status: Option<&'a str>,
+    scope: Option<&'a str>,
+    tag: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct SearchFilters<'a> {
+    file: Option<&'a str>,
+    symbol: Option<&'a str>,
+    kind: Option<&'a str>,
+    owner: Option<&'a str>,
+    template: Option<&'a str>,
+    review_status: Option<&'a str>,
+    scope: Option<&'a str>,
+    tag: Option<&'a str>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct TemplateDefinition {
+    #[serde(rename = "type")]
+    doc_type: String,
+    name: String,
+    description: String,
+    template: bool,
+    kind: String,
+    title_prefix: String,
+    body: String,
+    review_days: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    tags: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    required_fields: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct PolicySettings {
+    require_owner: bool,
+    require_author: bool,
+    require_template: bool,
+    require_review_status: bool,
+    stale_after_days: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    required_patterns: Vec<String>,
+}
+
+struct PrReportRender<'a> {
+    base: Option<&'a str>,
+    head: Option<&'a str>,
+    source_kind: &'a str,
+    changed_files: &'a [String],
+    grouped: &'a BTreeMap<String, Vec<SearchEntryRecord>>,
+    stale_refs: &'a [String],
+    unreviewed_refs: &'a [String],
+    uncovered_files: &'a [String],
+}
+
+#[derive(Clone, Debug, Default)]
+struct ValidationFindings {
+    errors: Vec<String>,
+    warnings: Vec<String>,
+    lensmap_dirty: bool,
+}
+
+#[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
+struct PolicyFinding {
+    level: String,
+    #[serde(rename = "ref")]
+    ref_id: String,
+    field: String,
+    code: String,
+    message: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct SummaryStats {
+    entry_count: usize,
+    stale_entries: usize,
+    files_with_notes: usize,
+    by_file: BTreeMap<String, usize>,
+    by_directory: BTreeMap<String, usize>,
+    by_owner: BTreeMap<String, usize>,
+    by_kind: BTreeMap<String, usize>,
+    by_template: BTreeMap<String, usize>,
+    by_review_status: BTreeMap<String, usize>,
+    by_scope: BTreeMap<String, usize>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -447,6 +572,14 @@ fn localized_error_message(error: &str) -> Option<String> {
         ),
         "from_required" => tr("Import requires --from.", "import 命令需要提供 --from。"),
         "query_required" => tr("Search requires --query.", "search 命令需要提供 --query。"),
+        "template_missing" => tr(
+            "The requested template could not be found.",
+            "未找到请求的模板。",
+        ),
+        "git_range_unavailable" => tr(
+            "The requested git base/head range could not be resolved.",
+            "无法解析请求的 Git base/head 范围。",
+        ),
         _ if error.starts_with("copy_failed:") => tr(
             "A file copy failed during packaging or unpackaging.",
             "打包或解包过程中出现文件复制失败。",
@@ -464,6 +597,7 @@ fn localized_action_message(action: &str) -> Option<String> {
     let message = match action {
         "init" => tr("LensMap initialized.", "LensMap 已初始化。"),
         "template_add" => tr("Template created.", "模板已创建。"),
+        "template_list" => tr("Templates listed.", "模板列表已生成。"),
         "scan" => tr("Anchor scan completed.", "锚点扫描已完成。"),
         "extract_comments" => tr("Comments extracted into LensMap.", "注释已提取到 LensMap。"),
         "merge" => tr(
@@ -492,6 +626,13 @@ fn localized_action_message(action: &str) -> Option<String> {
         "sync" => tr("LensMap sync completed.", "LensMap 同步已完成。"),
         "index" => tr("LensMap index refreshed.", "LensMap 索引已刷新。"),
         "search" => tr("LensMap search completed.", "LensMap 搜索已完成。"),
+        "policy_init" => tr("LensMap policy updated.", "LensMap 策略已更新。"),
+        "policy_check" => tr(
+            "LensMap policy check completed.",
+            "LensMap 策略检查已完成。",
+        ),
+        "summary" => tr("LensMap summary generated.", "LensMap 汇总已生成。"),
+        "pr_report" => tr("LensMap PR report generated.", "LensMap PR 报告已生成。"),
         "expose" => tr(
             "Lens exposed to the private store.",
             "镜头已暴露到私有存储。",
@@ -625,16 +766,269 @@ fn metadata_string_array(values: &[&str]) -> Value {
     )
 }
 
+fn default_policy_settings() -> PolicySettings {
+    PolicySettings {
+        require_owner: false,
+        require_author: false,
+        require_template: false,
+        require_review_status: false,
+        stale_after_days: 120,
+        required_patterns: vec![],
+    }
+}
+
+fn default_policy_value() -> Value {
+    serde_json::to_value(default_policy_settings()).unwrap_or_else(|_| json!({}))
+}
+
+fn metadata_string(metadata: &Map<String, Value>, key: &str, fallback: &str) -> String {
+    metadata
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn artifact_layers_for_doc(doc: &LensMapDoc) -> Vec<String> {
+    doc.metadata
+        .get("artifact_layers")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|item| item.to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| {
+            vec![
+                "canonical-json".to_string(),
+                "readable-markdown".to_string(),
+                "search-index".to_string(),
+            ]
+        })
+}
+
+fn policy_for_doc(doc: &LensMapDoc) -> PolicySettings {
+    doc.metadata
+        .get("policy")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<PolicySettings>(value).ok())
+        .unwrap_or_else(default_policy_settings)
+}
+
+fn store_policy(metadata: &mut Map<String, Value>, policy: &PolicySettings) {
+    metadata.insert(
+        "policy".to_string(),
+        serde_json::to_value(policy).unwrap_or_else(|_| json!({})),
+    );
+}
+
+fn bool_from_flag(args: &ParsedArgs, key: &str, fallback: bool) -> bool {
+    match args.get(key).map(|raw| raw.trim().to_lowercase()) {
+        Some(raw) if ["1", "true", "yes", "on"].contains(&raw.as_str()) => true,
+        Some(raw) if ["0", "false", "no", "off"].contains(&raw.as_str()) => false,
+        Some(_) => fallback,
+        None => fallback,
+    }
+}
+
+fn parse_i64_flag(args: &ParsedArgs, key: &str) -> Option<i64> {
+    args.get(key).and_then(|raw| raw.trim().parse::<i64>().ok())
+}
+
+fn normalize_tags(tags: &[String]) -> Vec<String> {
+    let mut uniq = BTreeMap::new();
+    for raw in tags {
+        let tag = raw.trim().to_lowercase();
+        if !tag.is_empty() {
+            uniq.insert(tag, true);
+        }
+    }
+    uniq.keys().cloned().collect()
+}
+
+fn parse_tags(raw: Option<&str>) -> Vec<String> {
+    normalize_tags(&split_csv(raw))
+}
+
+fn default_author() -> Option<String> {
+    for key in ["LENSMAP_AUTHOR", "GIT_AUTHOR_NAME", "USER", "USERNAME"] {
+        if let Ok(value) = env::var(key) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn default_scope_for_file(file: &str) -> String {
+    Path::new(file)
+        .parent()
+        .map(to_posix_str)
+        .filter(|value| !value.is_empty() && value != ".")
+        .unwrap_or_else(|| "repo".to_string())
+}
+
+fn entry_timestamp(entry: &EntryRecord) -> Option<DateTime<Utc>> {
+    for raw in [
+        entry.updated_at.as_deref(),
+        entry.review_due_at.as_deref(),
+        entry.created_at.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(parsed) = DateTime::parse_from_rfc3339(raw) {
+            return Some(parsed.with_timezone(&Utc));
+        }
+    }
+    None
+}
+
+fn entry_review_due(entry: &EntryRecord) -> Option<DateTime<Utc>> {
+    entry.review_due_at.as_deref().and_then(|raw| {
+        DateTime::parse_from_rfc3339(raw)
+            .ok()
+            .map(|parsed| parsed.with_timezone(&Utc))
+    })
+}
+
+fn entry_is_stale(entry: &EntryRecord, stale_after_days: i64) -> bool {
+    if let Some(due) = entry_review_due(entry) {
+        return due < Utc::now();
+    }
+    let Some(updated) = entry_timestamp(entry) else {
+        return false;
+    };
+    updated < Utc::now() - Duration::days(stale_after_days.max(1))
+}
+
+fn template_library() -> Vec<TemplateDefinition> {
+    vec![
+        TemplateDefinition {
+            doc_type: "lensmap-template".to_string(),
+            name: "architecture".to_string(),
+            description: "Architecture rationale and consequences.".to_string(),
+            template: true,
+            kind: "doc".to_string(),
+            title_prefix: "Architecture".to_string(),
+            body: "Context:\nDecision:\nConsequences:".to_string(),
+            review_days: 90,
+            tags: vec![
+                "architecture".to_string(),
+                "knowledge-boilerplate".to_string(),
+            ],
+            required_fields: vec!["title".to_string(), "owner".to_string(), "text".to_string()],
+        },
+        TemplateDefinition {
+            doc_type: "lensmap-template".to_string(),
+            name: "migration".to_string(),
+            description: "Migration plan, risk, and rollback notes.".to_string(),
+            template: true,
+            kind: "decision".to_string(),
+            title_prefix: "Migration".to_string(),
+            body: "Change:\nRisk:\nRollback:\nVerification:".to_string(),
+            review_days: 30,
+            tags: vec!["migration".to_string(), "knowledge-boilerplate".to_string()],
+            required_fields: vec!["owner".to_string(), "text".to_string()],
+        },
+        TemplateDefinition {
+            doc_type: "lensmap-template".to_string(),
+            name: "audit".to_string(),
+            description: "Audit and operational compliance note.".to_string(),
+            template: true,
+            kind: "doc".to_string(),
+            title_prefix: "Audit".to_string(),
+            body: "Finding:\nImpact:\nControl:\nFollow-up:".to_string(),
+            review_days: 30,
+            tags: vec!["audit".to_string(), "ops".to_string()],
+            required_fields: vec!["owner".to_string(), "text".to_string()],
+        },
+        TemplateDefinition {
+            doc_type: "lensmap-template".to_string(),
+            name: "review".to_string(),
+            description: "Code review rationale or follow-up note.".to_string(),
+            template: true,
+            kind: "comment".to_string(),
+            title_prefix: "Review".to_string(),
+            body: "Observation:\nRisk:\nSuggested follow-up:".to_string(),
+            review_days: 14,
+            tags: vec!["review".to_string()],
+            required_fields: vec!["author".to_string(), "text".to_string()],
+        },
+        TemplateDefinition {
+            doc_type: "lensmap-template".to_string(),
+            name: "decision".to_string(),
+            description: "Decision record with tradeoffs.".to_string(),
+            template: true,
+            kind: "decision".to_string(),
+            title_prefix: "Decision".to_string(),
+            body: "Decision:\nTradeoffs:\nOwner:".to_string(),
+            review_days: 60,
+            tags: vec!["decision".to_string()],
+            required_fields: vec!["title".to_string(), "owner".to_string(), "text".to_string()],
+        },
+        TemplateDefinition {
+            doc_type: "lensmap-template".to_string(),
+            name: "todo".to_string(),
+            description: "Managed TODO note with owner and due cadence.".to_string(),
+            template: true,
+            kind: "todo".to_string(),
+            title_prefix: "TODO".to_string(),
+            body: "Task:\nOwner:\nExit criteria:".to_string(),
+            review_days: 14,
+            tags: vec!["todo".to_string()],
+            required_fields: vec!["owner".to_string(), "text".to_string()],
+        },
+    ]
+}
+
+fn builtin_template(name: &str) -> Option<TemplateDefinition> {
+    let normalized = name.trim().to_lowercase();
+    template_library()
+        .into_iter()
+        .find(|template| template.name == normalized)
+}
+
+fn template_file_path(root: &Path, name: &str) -> PathBuf {
+    root.join("templates")
+        .join(format!("{}.lens.template.json", name.trim().to_lowercase()))
+}
+
+fn load_template(root: &Path, name: &str) -> Option<TemplateDefinition> {
+    if let Some(template) = builtin_template(name) {
+        return Some(template);
+    }
+    let path = template_file_path(root, name);
+    if !path.exists() {
+        return None;
+    }
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<TemplateDefinition>(&raw).ok()
+}
+
 fn apply_default_metadata(metadata: &mut Map<String, Value>) {
     metadata
         .entry("positioning".to_string())
         .or_insert_with(|| Value::String("external-doc-layer".to_string()));
+    metadata
+        .entry("boilerplate_scope".to_string())
+        .or_insert_with(|| Value::String("knowledge".to_string()));
     metadata
         .entry("default_anchor_mode".to_string())
         .or_insert_with(|| Value::String("smart".to_string()));
     metadata
         .entry("primary_artifact".to_string())
         .or_insert_with(|| Value::String("json+markdown".to_string()));
+    metadata
+        .entry("artifact_layers".to_string())
+        .or_insert_with(|| {
+            metadata_string_array(&["canonical-json", "readable-markdown", "search-index"])
+        });
     metadata
         .entry("anchor_placement".to_string())
         .or_insert_with(|| Value::String("inline".to_string()));
@@ -664,6 +1058,9 @@ fn apply_default_metadata(metadata: &mut Map<String, Value>) {
                 "generated explanations",
             ])
         });
+    metadata
+        .entry("policy".to_string())
+        .or_insert_with(default_policy_value);
 }
 
 fn parse_anchor_placement(raw: &str) -> Option<AnchorPlacement> {
@@ -1021,6 +1418,44 @@ fn git_diff_text(root: &Path, rel: &str) -> Option<String> {
     None
 }
 
+fn git_changed_files(root: &Path, base: &str, head: &str) -> Option<Vec<String>> {
+    let range = format!("{}..{}", base, head);
+    let output = git_output(root, &["diff", "--name-only", &range])?;
+    let mut files = BTreeMap::new();
+    for line in output.lines() {
+        let rel = line.trim().replace('\\', "/");
+        if !rel.is_empty() {
+            files.insert(rel, true);
+        }
+    }
+    Some(files.keys().cloned().collect())
+}
+
+fn git_worktree_changed_files(root: &Path) -> Vec<String> {
+    let output = git_output(root, &["status", "--porcelain", "--untracked-files=all"]);
+    let Some(output) = output.filter(|output| !output.trim().is_empty()) else {
+        return vec![];
+    };
+
+    let mut files = BTreeMap::new();
+    for raw_line in output.lines() {
+        let line = raw_line.trim();
+        if line.len() < 4 {
+            continue;
+        }
+        let rel = line[3..]
+            .rsplit_once(" -> ")
+            .map(|(_, new_path)| new_path)
+            .unwrap_or(&line[3..])
+            .trim()
+            .replace('\\', "/");
+        if !rel.is_empty() {
+            files.insert(rel, true);
+        }
+    }
+    files.keys().cloned().collect()
+}
+
 fn parse_diff_hunks(diff: &str) -> Vec<GitHunk> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap());
@@ -1155,6 +1590,14 @@ fn anchor_overlaps_dirty_ranges(anchor: &AnchorRecord, ranges: &[(usize, usize)]
 
 fn default_index_path(root: &Path) -> PathBuf {
     root.join(".lensmap-index.json")
+}
+
+fn artifact_paths(root: &Path, lensmap_path: &Path) -> (String, String, String) {
+    (
+        normalize_relative(root, lensmap_path),
+        normalize_relative(root, &default_render_output_path(lensmap_path)),
+        normalize_relative(root, &default_index_path(root)),
+    )
 }
 
 fn make_index_doc(
@@ -3414,32 +3857,32 @@ fn cmd_init(root: &Path, args: &ParsedArgs) {
 }
 
 fn cmd_template_add(root: &Path, args: &ParsedArgs) {
-    let t = args
+    let requested = args
         .positional
         .get(2)
         .map(String::as_str)
-        .unwrap_or("default")
+        .unwrap_or("architecture")
         .trim()
-        .to_string();
-    let template = if t.is_empty() {
-        "default".to_string()
-    } else {
-        t
-    };
-    let template_path = root
-        .join("templates")
-        .join(format!("{}.lens.template.json", template));
-    ensure_dir(&template_path);
-    let payload = json!({
-        "type": template,
-        "template": true,
-        "fields": ["title", "owner", "scope", "anchor", "ref", "text"]
+        .to_lowercase();
+    let template = builtin_template(&requested).unwrap_or_else(|| TemplateDefinition {
+        doc_type: "lensmap-template".to_string(),
+        name: requested.clone(),
+        description: "Custom LensMap template.".to_string(),
+        template: true,
+        kind: "comment".to_string(),
+        title_prefix: requested.to_uppercase(),
+        body: "Context:\nAction:\nFollow-up:".to_string(),
+        review_days: 30,
+        tags: vec!["knowledge-boilerplate".to_string()],
+        required_fields: vec!["text".to_string()],
     });
+    let template_path = template_file_path(root, &template.name);
+    ensure_dir(&template_path);
     let _ = fs::write(
         &template_path,
         format!(
             "{}\n",
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+            serde_json::to_string_pretty(&template).unwrap_or_else(|_| "{}".to_string())
         ),
     );
 
@@ -3448,6 +3891,63 @@ fn cmd_template_add(root: &Path, args: &ParsedArgs) {
         "type": "lensmap",
         "action": "template_add",
         "template": normalize_relative(root, &template_path),
+        "name": template.name,
+        "kind": template.kind,
+        "tags": template.tags,
+        "review_days": template.review_days,
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_template_list(root: &Path) {
+    let mut templates = vec![];
+    for template in template_library() {
+        templates.push(json!({
+            "name": template.name,
+            "description": template.description,
+            "kind": template.kind,
+            "review_days": template.review_days,
+            "tags": template.tags,
+            "source": "builtin",
+        }));
+    }
+    let templates_dir = root.join("templates");
+    if templates_dir.exists() {
+        for entry in WalkDir::new(&templates_dir)
+            .into_iter()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_type().is_file())
+        {
+            let path = entry.path();
+            if !path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.ends_with(".lens.template.json"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            let raw = fs::read_to_string(path).unwrap_or_default();
+            if let Ok(template) = serde_json::from_str::<TemplateDefinition>(&raw) {
+                templates.push(json!({
+                    "name": template.name,
+                    "description": template.description,
+                    "kind": template.kind,
+                    "review_days": template.review_days,
+                    "tags": template.tags,
+                    "source": normalize_relative(root, path),
+                }));
+            }
+        }
+    }
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "template_list",
+        "templates": templates,
+        "count": templates.len(),
         "ts": now_iso(),
     });
     append_history(root, &out);
@@ -3762,6 +4262,15 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
                     "comment".to_string()
                 }),
                 text: Some(block.text.trim().to_string()),
+                title: None,
+                owner: None,
+                author: None,
+                scope: None,
+                template: None,
+                review_status: None,
+                review_due_at: None,
+                updated_at: None,
+                tags: vec![],
                 created_at: Some(now_iso()),
                 source: Some("extract_comments".to_string()),
             };
@@ -3847,7 +4356,7 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
         .unwrap_or("")
         .trim()
         .to_string();
-    let text = args
+    let raw_text = args
         .get("text")
         .or_else(|| args.positional.get(2).map(String::as_str))
         .unwrap_or("")
@@ -3856,23 +4365,23 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
     let requested_file = args.get("file").unwrap_or("").trim().to_string();
     let requested_symbol = args.get("symbol").unwrap_or("").trim().to_string();
     let requested_symbol_path = args.get("symbol-path").unwrap_or("").trim().to_string();
-
-    if text.is_empty() {
-        emit(
-            json!({
-                "ok": false,
-                "type": "lensmap",
-                "action": "annotate",
-                "error": "annotate_requires_text",
-                "hint": tr(
-                    "Use --text=<comment text> with either --ref=<HEX-start[-end]> or --file + --symbol.",
-                    "请配合 --ref=<HEX-start[-end]> 或 --file + --symbol 一起使用 --text=<comment text>。",
-                ),
-                "example": "lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text=\"why this exists\"",
-            }),
-            1,
-        );
-    }
+    let template_name = args.get("template").unwrap_or("").trim().to_lowercase();
+    let template = if template_name.is_empty() {
+        None
+    } else {
+        Some(load_template(root, &template_name).unwrap_or_else(|| {
+            emit(
+                json!({
+                    "ok": false,
+                    "type": "lensmap",
+                    "action": "annotate",
+                    "error": "template_missing",
+                    "template": template_name,
+                }),
+                1,
+            );
+        }))
+    };
 
     let (parsed, anchor, mut file, created_anchor) = if raw_ref.is_empty() {
         if requested_file.is_empty() || requested_symbol.is_empty() {
@@ -4036,7 +4545,37 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
     }
     file = normalize_relative(root, &abs_file);
 
-    let kind_raw = args.get("kind").unwrap_or("comment").trim().to_lowercase();
+    let text = if raw_text.is_empty() {
+        template
+            .as_ref()
+            .map(|template| template.body.clone())
+            .unwrap_or_default()
+    } else {
+        raw_text.clone()
+    };
+    if text.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "annotate",
+                "error": "annotate_requires_text",
+                "hint": tr(
+                    "Use --text=<comment text> with either --ref=<HEX-start[-end]> or --file + --symbol, or pass --template=<name> for a boilerplate note skeleton.",
+                    "请配合 --ref=<HEX-start[-end]> 或 --file + --symbol 一起使用 --text=<comment text>，或者通过 --template=<name> 使用结构化注释模板。",
+                ),
+                "example": "lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --template=review",
+            }),
+            1,
+        );
+    }
+
+    let kind_raw = args
+        .get("kind")
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+        .or_else(|| template.as_ref().map(|template| template.kind.clone()))
+        .unwrap_or_else(|| "comment".to_string());
     let kind = if ["comment", "doc", "todo", "decision"].contains(&kind_raw.as_str()) {
         kind_raw
     } else {
@@ -4055,6 +4594,44 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
 
     let source = args.get("source").unwrap_or("annotate").trim().to_string();
     let ts = now_iso();
+    let requested_title = args.get("title").unwrap_or("").trim().to_string();
+    let requested_owner = args.get("owner").unwrap_or("").trim().to_string();
+    let requested_author = args.get("author").unwrap_or("").trim().to_string();
+    let requested_scope = args.get("scope").unwrap_or("").trim().to_string();
+    let requested_review_status = args
+        .get("review-status")
+        .unwrap_or("")
+        .trim()
+        .to_lowercase();
+    let requested_review_due_at = args.get("review-due-at").unwrap_or("").trim().to_string();
+    let requested_review_days = parse_i64_flag(args, "review-days");
+    let requested_tags = parse_tags(args.get("tags").or_else(|| args.get("tag")));
+    let default_title = template.as_ref().map(|template| {
+        let subject = anchor
+            .symbol_path
+            .clone()
+            .or(anchor.symbol.clone())
+            .unwrap_or_else(|| canonical_ref.clone());
+        format!("{}: {}", template.title_prefix, subject)
+    });
+    let default_review_status = template.as_ref().map(|template| {
+        if template.name == "review" {
+            "in_review".to_string()
+        } else {
+            "draft".to_string()
+        }
+    });
+    let template_review_days = template.as_ref().map(|template| template.review_days);
+    let merged_tags = normalize_tags(
+        &template
+            .as_ref()
+            .map(|template| {
+                let mut combined = template.tags.clone();
+                combined.extend(requested_tags.clone());
+                combined
+            })
+            .unwrap_or_else(|| requested_tags.clone()),
+    );
     let mut updated = false;
 
     for entry in &mut doc.entries {
@@ -4064,6 +4641,51 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
             entry.text = Some(text.clone());
             entry.source = Some(source.clone());
             entry.created_at = Some(ts.clone());
+            entry.updated_at = Some(ts.clone());
+            if !requested_title.is_empty() {
+                entry.title = Some(requested_title.clone());
+            } else if entry.title.is_none() {
+                entry.title = default_title.clone();
+            }
+            if !requested_owner.is_empty() {
+                entry.owner = Some(requested_owner.clone());
+            }
+            if !requested_author.is_empty() {
+                entry.author = Some(requested_author.clone());
+            } else if entry.author.is_none() {
+                entry.author = default_author();
+            }
+            if !requested_scope.is_empty() {
+                entry.scope = Some(requested_scope.clone());
+            } else if entry.scope.is_none() {
+                entry.scope = Some(default_scope_for_file(&file));
+            }
+            if let Some(template) = &template {
+                entry.template = Some(template.name.clone());
+            }
+            if !requested_review_status.is_empty() {
+                entry.review_status = Some(requested_review_status.clone());
+            } else if entry.review_status.is_none() {
+                entry.review_status = default_review_status.clone();
+            }
+            if !requested_review_due_at.is_empty() {
+                entry.review_due_at = Some(requested_review_due_at.clone());
+            } else if let Some(days) = requested_review_days.or(template_review_days) {
+                if entry.review_due_at.is_none() || !requested_review_status.is_empty() {
+                    entry.review_due_at =
+                        Some((Utc::now() + Duration::days(days.max(1))).to_rfc3339());
+                }
+            }
+            if !merged_tags.is_empty() {
+                entry.tags = normalize_tags(
+                    &entry
+                        .tags
+                        .iter()
+                        .cloned()
+                        .chain(merged_tags.clone().into_iter())
+                        .collect::<Vec<_>>(),
+                );
+            }
             updated = true;
             break;
         }
@@ -4076,6 +4698,41 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
             anchor_id: Some(parsed.anchor_id.clone()),
             kind: Some(kind.clone()),
             text: Some(text.clone()),
+            title: if requested_title.is_empty() {
+                default_title.clone()
+            } else {
+                Some(requested_title.clone())
+            },
+            owner: if requested_owner.is_empty() {
+                None
+            } else {
+                Some(requested_owner.clone())
+            },
+            author: if requested_author.is_empty() {
+                default_author()
+            } else {
+                Some(requested_author.clone())
+            },
+            scope: if requested_scope.is_empty() {
+                Some(default_scope_for_file(&file))
+            } else {
+                Some(requested_scope.clone())
+            },
+            template: template.as_ref().map(|template| template.name.clone()),
+            review_status: if requested_review_status.is_empty() {
+                default_review_status.clone()
+            } else {
+                Some(requested_review_status.clone())
+            },
+            review_due_at: if !requested_review_due_at.is_empty() {
+                Some(requested_review_due_at.clone())
+            } else {
+                requested_review_days
+                    .or(template_review_days)
+                    .map(|days| (Utc::now() + Duration::days(days.max(1))).to_rfc3339())
+            },
+            updated_at: Some(ts.clone()),
+            tags: merged_tags.clone(),
             created_at: Some(ts.clone()),
             source: Some(source.clone()),
         });
@@ -4097,6 +4754,12 @@ fn cmd_annotate(root: &Path, args: &ParsedArgs) {
         "kind": kind,
         "anchor_id": anchor.id,
         "anchor_created": created_anchor,
+        "template": template.as_ref().map(|template| template.name.clone()),
+        "owner": if requested_owner.is_empty() { None::<String> } else { Some(requested_owner) },
+        "author": if requested_author.is_empty() { default_author() } else { Some(requested_author) },
+        "scope": if requested_scope.is_empty() { Some(default_scope_for_file(&file)) } else { Some(requested_scope) },
+        "review_status": if requested_review_status.is_empty() { default_review_status } else { Some(requested_review_status) },
+        "tags": merged_tags,
         "symbol": anchor.symbol,
         "symbol_path": anchor.symbol_path,
         "updated_existing": updated,
@@ -4698,17 +5361,8 @@ fn cmd_unpackage(root: &Path, args: &ParsedArgs) {
     emit(out, if ok { 0 } else { 1 });
 }
 
-fn cmd_validate(root: &Path, args: &ParsedArgs) {
-    let lensmap_path = resolve_lensmap_path(root, args, None);
-    if !lensmap_path.exists() {
-        emit(
-            lensmap_missing_payload(root, "validate", &lensmap_path, args),
-            1,
-        );
-    }
-
-    let doc = load_doc(&lensmap_path, "group");
-    let lensmap_rel = normalize_relative(root, &lensmap_path);
+fn validate_doc(root: &Path, lensmap_path: &Path, doc: &LensMapDoc) -> ValidationFindings {
+    let lensmap_rel = normalize_relative(root, lensmap_path);
     let lensmap_dirty = git_is_dirty(root, &lensmap_rel);
     let mut errors = vec![];
     let mut warnings = vec![];
@@ -4903,22 +5557,830 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
         }
     }
 
-    let ok = errors.is_empty();
+    ValidationFindings {
+        errors,
+        warnings,
+        lensmap_dirty,
+    }
+}
+
+fn cmd_validate(root: &Path, args: &ParsedArgs) {
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "validate", &lensmap_path, args),
+            1,
+        );
+    }
+
+    let doc = load_doc(&lensmap_path, "group");
+    let findings = validate_doc(root, &lensmap_path, &doc);
+    let ok = findings.errors.is_empty();
     let out = json!({
         "ok": ok,
         "type": "lensmap",
         "action": "validate",
         "lensmap": normalize_relative(root, &lensmap_path),
         "git": {
-            "lensmap_dirty": lensmap_dirty,
+            "lensmap_dirty": findings.lensmap_dirty,
         },
-        "errors": errors,
-        "warnings": warnings,
+        "errors": findings.errors,
+        "warnings": findings.warnings,
         "stats": {
             "covers": doc.covers.len(),
             "anchors": doc.anchors.len(),
             "entries": doc.entries.len(),
         },
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, if ok { 0 } else { 1 });
+}
+
+fn increment_counter(map: &mut BTreeMap<String, usize>, raw: &str, fallback: &str) {
+    let value = if raw.trim().is_empty() {
+        fallback.trim()
+    } else {
+        raw.trim()
+    };
+    if value.is_empty() {
+        return;
+    }
+    *map.entry(value.to_string()).or_insert(0) += 1;
+}
+
+fn counter_rows(map: &BTreeMap<String, usize>, limit: usize) -> Vec<Value> {
+    let mut rows = map
+        .iter()
+        .map(|(name, count)| (name.clone(), *count))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    if limit > 0 && rows.len() > limit {
+        rows.truncate(limit);
+    }
+    rows.into_iter()
+        .map(|(name, count)| json!({"name": name, "count": count}))
+        .collect()
+}
+
+fn render_counter_section(
+    lines: &mut Vec<String>,
+    title: &str,
+    map: &BTreeMap<String, usize>,
+    limit: usize,
+) {
+    lines.push(format!("## {}", title));
+    if map.is_empty() {
+        lines.push("- none".to_string());
+        lines.push(String::new());
+        return;
+    }
+    for row in counter_rows(map, limit) {
+        let name = row.get("name").and_then(Value::as_str).unwrap_or("unknown");
+        let count = row.get("count").and_then(Value::as_u64).unwrap_or(0);
+        lines.push(format!("- `{}`: {}", name, count));
+    }
+    lines.push(String::new());
+}
+
+fn collect_policy_findings(
+    root: &Path,
+    doc: &LensMapDoc,
+) -> (PolicySettings, Vec<PolicyFinding>, Vec<PolicyFinding>) {
+    let policy = policy_for_doc(doc);
+    let mut errors = vec![];
+    let mut warnings = vec![];
+
+    for entry in &doc.entries {
+        if policy.require_owner && entry.owner.as_deref().unwrap_or("").trim().is_empty() {
+            errors.push(PolicyFinding {
+                level: "error".to_string(),
+                ref_id: entry.ref_id.clone(),
+                field: "owner".to_string(),
+                code: "missing_owner".to_string(),
+                message: format!("Entry {} is missing an owner.", entry.ref_id),
+            });
+        }
+        if policy.require_author && entry.author.as_deref().unwrap_or("").trim().is_empty() {
+            errors.push(PolicyFinding {
+                level: "error".to_string(),
+                ref_id: entry.ref_id.clone(),
+                field: "author".to_string(),
+                code: "missing_author".to_string(),
+                message: format!("Entry {} is missing an author.", entry.ref_id),
+            });
+        }
+        if policy.require_template && entry.template.as_deref().unwrap_or("").trim().is_empty() {
+            errors.push(PolicyFinding {
+                level: "error".to_string(),
+                ref_id: entry.ref_id.clone(),
+                field: "template".to_string(),
+                code: "missing_template".to_string(),
+                message: format!("Entry {} is missing a template.", entry.ref_id),
+            });
+        }
+        if policy.require_review_status
+            && entry
+                .review_status
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+        {
+            errors.push(PolicyFinding {
+                level: "error".to_string(),
+                ref_id: entry.ref_id.clone(),
+                field: "review_status".to_string(),
+                code: "missing_review_status".to_string(),
+                message: format!("Entry {} is missing a review status.", entry.ref_id),
+            });
+        }
+        if policy.stale_after_days > 0 && entry_is_stale(entry, policy.stale_after_days) {
+            warnings.push(PolicyFinding {
+                level: "warning".to_string(),
+                ref_id: entry.ref_id.clone(),
+                field: "review_due_at".to_string(),
+                code: "stale_entry".to_string(),
+                message: format!("Entry {} is stale and should be reviewed.", entry.ref_id),
+            });
+        }
+    }
+
+    if !policy.required_patterns.is_empty() {
+        let all_files = resolve_covers_to_files(root, &doc.covers);
+        let noted_files = doc
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let file = entry.file.trim();
+                if file.is_empty() {
+                    None
+                } else {
+                    Some(file.to_string())
+                }
+            })
+            .collect::<HashSet<_>>();
+
+        for pattern in &policy.required_patterns {
+            let matched = all_files
+                .iter()
+                .filter(|file| wildcard_match(pattern, file))
+                .cloned()
+                .collect::<Vec<_>>();
+            if matched.is_empty() {
+                warnings.push(PolicyFinding {
+                    level: "warning".to_string(),
+                    ref_id: format!("policy:{}", pattern),
+                    field: "required_patterns".to_string(),
+                    code: "pattern_matches_no_files".to_string(),
+                    message: format!("Policy pattern '{}' matched no covered files.", pattern),
+                });
+                continue;
+            }
+            let uncovered = matched
+                .iter()
+                .filter(|file| !noted_files.contains(*file))
+                .cloned()
+                .collect::<Vec<_>>();
+            if !uncovered.is_empty() {
+                let preview = uncovered
+                    .iter()
+                    .take(3)
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                errors.push(PolicyFinding {
+                    level: "error".to_string(),
+                    ref_id: format!("policy:{}", pattern),
+                    field: "required_patterns".to_string(),
+                    code: "required_pattern_missing_notes".to_string(),
+                    message: format!(
+                        "Policy pattern '{}' matched files without LensMap notes: {}{}",
+                        pattern,
+                        preview,
+                        if uncovered.len() > 3 { ", ..." } else { "" }
+                    ),
+                });
+            }
+        }
+    }
+
+    (policy, errors, warnings)
+}
+
+fn summary_stats(entries: &[SearchEntryRecord], stale_after_days: i64) -> SummaryStats {
+    let mut stats = SummaryStats {
+        entry_count: entries.len(),
+        ..SummaryStats::default()
+    };
+
+    for entry in entries {
+        increment_counter(&mut stats.by_file, &entry.file, "unknown");
+        let directory = Path::new(&entry.file)
+            .parent()
+            .map(to_posix_str)
+            .filter(|value| !value.is_empty() && value != ".")
+            .unwrap_or_else(|| "repo".to_string());
+        increment_counter(&mut stats.by_directory, &directory, "repo");
+        increment_counter(
+            &mut stats.by_owner,
+            entry.owner.as_deref().unwrap_or(""),
+            "unassigned",
+        );
+        increment_counter(
+            &mut stats.by_kind,
+            entry.kind.as_deref().unwrap_or(""),
+            "comment",
+        );
+        increment_counter(
+            &mut stats.by_template,
+            entry.template.as_deref().unwrap_or(""),
+            "ad-hoc",
+        );
+        increment_counter(
+            &mut stats.by_review_status,
+            entry.review_status.as_deref().unwrap_or(""),
+            "unspecified",
+        );
+        increment_counter(
+            &mut stats.by_scope,
+            entry.scope.as_deref().unwrap_or(""),
+            "repo",
+        );
+
+        let entry_record = EntryRecord {
+            ref_id: entry.ref_id.clone(),
+            file: entry.file.clone(),
+            anchor_id: entry.anchor_id.clone(),
+            kind: entry.kind.clone(),
+            text: entry.text.clone(),
+            title: entry.title.clone(),
+            owner: entry.owner.clone(),
+            author: entry.author.clone(),
+            scope: entry.scope.clone(),
+            template: entry.template.clone(),
+            review_status: entry.review_status.clone(),
+            review_due_at: entry.review_due_at.clone(),
+            updated_at: entry.updated_at.clone(),
+            tags: entry.tags.clone(),
+            created_at: None,
+            source: None,
+        };
+        if stale_after_days > 0 && entry_is_stale(&entry_record, stale_after_days) {
+            stats.stale_entries += 1;
+        }
+    }
+
+    stats.files_with_notes = stats.by_file.len();
+    stats
+}
+
+fn summary_stats_to_value(stats: &SummaryStats, top: usize) -> Value {
+    json!({
+        "entry_count": stats.entry_count,
+        "files_with_notes": stats.files_with_notes,
+        "stale_entries": stats.stale_entries,
+        "by_file": counter_rows(&stats.by_file, top),
+        "by_directory": counter_rows(&stats.by_directory, top),
+        "by_owner": counter_rows(&stats.by_owner, top),
+        "by_kind": counter_rows(&stats.by_kind, top),
+        "by_template": counter_rows(&stats.by_template, top),
+        "by_review_status": counter_rows(&stats.by_review_status, top),
+        "by_scope": counter_rows(&stats.by_scope, top),
+    })
+}
+
+fn render_summary_markdown(
+    title: &str,
+    stats: &SummaryStats,
+    lensmaps: &[String],
+    filters: &Map<String, Value>,
+    top: usize,
+) -> String {
+    let mut lines = vec![
+        format!("# {}", title),
+        String::new(),
+        format!("- LensMaps: {}", lensmaps.len()),
+        format!("- Entries: {}", stats.entry_count),
+        format!("- Files with notes: {}", stats.files_with_notes),
+        format!("- Stale entries: {}", stats.stale_entries),
+        String::new(),
+    ];
+
+    if !filters.is_empty() {
+        lines.push("## Filters".to_string());
+        for (key, value) in filters {
+            if value.is_null() {
+                continue;
+            }
+            lines.push(format!("- `{}`: {}", key, value));
+        }
+        lines.push(String::new());
+    }
+
+    render_counter_section(&mut lines, "Files", &stats.by_file, top);
+    render_counter_section(&mut lines, "Directories", &stats.by_directory, top);
+    render_counter_section(&mut lines, "Owners", &stats.by_owner, top);
+    render_counter_section(&mut lines, "Kinds", &stats.by_kind, top);
+    render_counter_section(&mut lines, "Templates", &stats.by_template, top);
+    render_counter_section(&mut lines, "Review Status", &stats.by_review_status, top);
+    render_counter_section(&mut lines, "Scopes", &stats.by_scope, top);
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn default_pr_report_output_path(root: &Path) -> PathBuf {
+    root.join("lensmap-pr-report.md")
+}
+
+fn render_pr_report_markdown(report: PrReportRender<'_>) -> String {
+    let mut lines = vec![
+        format!("# {}", tr("LensMap PR Report", "LensMap PR 报告")),
+        String::new(),
+        format!(
+            "- {}: {}",
+            tr("Change source", "变更来源"),
+            report.source_kind
+        ),
+        format!("- {}: {}", tr("Base", "基线"), report.base.unwrap_or("-")),
+        format!("- {}: {}", tr("Head", "目标"), report.head.unwrap_or("-")),
+        format!(
+            "- {}: {}",
+            tr("Changed files", "变更文件"),
+            report.changed_files.len()
+        ),
+        format!(
+            "- {}: {}",
+            tr("Files with notes", "带注释文件"),
+            report.grouped.len()
+        ),
+        format!(
+            "- {}: {}",
+            tr("Stale notes touching change", "涉及变更的过期注释"),
+            report.stale_refs.len()
+        ),
+        format!(
+            "- {}: {}",
+            tr("Unreviewed notes touching change", "涉及变更的未评审注释"),
+            report.unreviewed_refs.len()
+        ),
+        format!(
+            "- {}: {}",
+            tr("Changed files without notes", "无注释的变更文件"),
+            report.uncovered_files.len()
+        ),
+        String::new(),
+    ];
+
+    lines.push(format!(
+        "## {}",
+        tr("Changed Files With Notes", "带注释的变更文件")
+    ));
+    if report.grouped.is_empty() {
+        lines.push(format!("- {}", tr("none", "无")));
+        lines.push(String::new());
+    } else {
+        for (file, entries) in report.grouped {
+            lines.push(format!("### `{}`", file));
+            for entry in entries {
+                let summary = entry
+                    .title
+                    .clone()
+                    .or_else(|| entry.text.clone())
+                    .unwrap_or_else(|| tr("Untitled note", "未命名注释"));
+                let mut detail = vec![
+                    format!("`{}`", entry.ref_id),
+                    entry.kind.clone().unwrap_or_else(|| "comment".to_string()),
+                    summary.replace('\n', " "),
+                ];
+                if let Some(owner) = entry
+                    .owner
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    detail.push(format!("owner={}", owner));
+                }
+                if let Some(status) = entry
+                    .review_status
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    detail.push(format!("review={}", status));
+                }
+                lines.push(format!("- {}", detail.join(" | ")));
+            }
+            lines.push(String::new());
+        }
+    }
+
+    lines.push(format!(
+        "## {}",
+        tr("Changed Files Without Notes", "无注释的变更文件")
+    ));
+    if report.uncovered_files.is_empty() {
+        lines.push(format!("- {}", tr("none", "无")));
+    } else {
+        for file in report.uncovered_files {
+            lines.push(format!("- `{}`", file));
+        }
+    }
+    lines.push(String::new());
+
+    format!("{}\n", lines.join("\n"))
+}
+
+fn cmd_policy_init(root: &Path, args: &ParsedArgs) {
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "policy_init", &lensmap_path, args),
+            1,
+        );
+    }
+    if !is_within_root(root, &lensmap_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+
+    let mut doc = load_doc(&lensmap_path, "group");
+    let mut policy = policy_for_doc(&doc);
+    policy.require_owner = bool_from_flag(args, "require-owner", policy.require_owner);
+    policy.require_author = bool_from_flag(args, "require-author", policy.require_author);
+    policy.require_template = bool_from_flag(args, "require-template", policy.require_template);
+    policy.require_review_status =
+        bool_from_flag(args, "require-review-status", policy.require_review_status);
+    if let Some(days) = parse_i64_flag(args, "stale-after-days") {
+        policy.stale_after_days = days.max(0);
+    }
+    if let Some(raw) = args
+        .get("required-patterns")
+        .or_else(|| args.get("required-pattern"))
+    {
+        policy.required_patterns = split_csv(Some(raw));
+    }
+    store_policy(&mut doc.metadata, &policy);
+    save_doc(&lensmap_path, doc.clone());
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "policy_init",
+        "lensmap": normalize_relative(root, &lensmap_path),
+        "policy": policy,
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_policy_check(root: &Path, args: &ParsedArgs) {
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    if !lensmap_path.exists() {
+        emit(
+            lensmap_missing_payload(root, "policy_check", &lensmap_path, args),
+            1,
+        );
+    }
+
+    let doc = load_doc(&lensmap_path, "group");
+    let structural = validate_doc(root, &lensmap_path, &doc);
+    let (policy, errors, warnings) = collect_policy_findings(root, &doc);
+    let fail_on_warnings = args.has("fail-on-warnings");
+    let ok = structural.errors.is_empty()
+        && errors.is_empty()
+        && (!fail_on_warnings || warnings.is_empty());
+    let out = json!({
+        "ok": ok,
+        "type": "lensmap",
+        "action": "policy_check",
+        "lensmap": normalize_relative(root, &lensmap_path),
+        "policy": policy,
+        "findings": {
+            "errors": errors,
+            "warnings": warnings,
+        },
+        "validate": {
+            "errors": structural.errors,
+            "warnings": structural.warnings,
+            "lensmap_dirty": structural.lensmap_dirty,
+        },
+        "stats": {
+            "covers": doc.covers.len(),
+            "anchors": doc.anchors.len(),
+            "entries": doc.entries.len(),
+        },
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, if ok { 0 } else { 1 });
+}
+
+fn cmd_summary(root: &Path, args: &ParsedArgs) {
+    let lensmaps = resolve_search_lensmap_paths(root, args);
+    if lensmaps.is_empty() {
+        emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+    }
+
+    let file_filter = args
+        .get("file")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let symbol_filter = args
+        .get("symbol")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let kind_filter = args
+        .get("kind")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let owner_filter = args
+        .get("owner")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let template_filter = args
+        .get("template")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let review_filter = args
+        .get("review-status")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let scope_filter = args
+        .get("scope")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tag_filter = args
+        .get("tag")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let search_filters = search_filters_from_args(args);
+    let top = args
+        .get("top")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 100);
+
+    let explicit_range = args.get("base").is_some() || args.get("head").is_some();
+    let base = args.get("base");
+    let head = args.get("head").or(Some("HEAD"));
+    let changed_files = if explicit_range {
+        git_changed_files(root, base.unwrap_or("HEAD~1"), head.unwrap_or("HEAD")).unwrap_or_else(
+            || {
+                emit(
+                    json!({
+                        "ok": false,
+                        "type": "lensmap",
+                        "action": "summary",
+                        "error": "git_range_unavailable",
+                        "base": base,
+                        "head": head,
+                    }),
+                    1,
+                );
+            },
+        )
+    } else {
+        vec![]
+    };
+    let changed_filter = if explicit_range {
+        Some(changed_files.iter().cloned().collect::<HashSet<_>>())
+    } else {
+        None
+    };
+
+    let entries = collect_repo_search_entries(root, &lensmaps)
+        .into_iter()
+        .filter(|entry| search_entry_matches_filters(entry, search_filters))
+        .filter(|entry| {
+            changed_filter
+                .as_ref()
+                .map(|changed| changed.contains(&entry.file))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+
+    let stale_after_days = lensmaps
+        .first()
+        .map(|lensmap| resolve_from_root(root, lensmap))
+        .map(|path| load_doc(&path, "group"))
+        .map(|doc| policy_for_doc(&doc).stale_after_days)
+        .unwrap_or_else(|| default_policy_settings().stale_after_days);
+    let stats = summary_stats(&entries, stale_after_days);
+    let summary = summary_stats_to_value(&stats, top);
+
+    let mut filters = Map::new();
+    filters.insert("file".to_string(), json!(file_filter));
+    filters.insert("symbol".to_string(), json!(symbol_filter));
+    filters.insert("kind".to_string(), json!(kind_filter));
+    filters.insert("owner".to_string(), json!(owner_filter));
+    filters.insert("template".to_string(), json!(template_filter));
+    filters.insert("review_status".to_string(), json!(review_filter));
+    filters.insert("scope".to_string(), json!(scope_filter));
+    filters.insert("tag".to_string(), json!(tag_filter));
+    if explicit_range {
+        filters.insert("base".to_string(), json!(base));
+        filters.insert("head".to_string(), json!(head));
+    }
+
+    let output_path = args.get("out").map(|out| resolve_from_root(root, out));
+    if let Some(output_path) = output_path.as_ref() {
+        if !is_within_root(root, output_path) {
+            emit(
+                json!({"ok": false, "error": "security_output_outside_root"}),
+                1,
+            );
+        }
+        ensure_dir(output_path);
+        let markdown = render_summary_markdown(
+            &tr("LensMap Summary", "LensMap 汇总"),
+            &stats,
+            &lensmaps,
+            &filters,
+            top,
+        );
+        let _ = fs::write(output_path, markdown);
+    }
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "summary",
+        "lensmaps": lensmaps,
+        "changed_files": changed_files,
+        "filters": filters,
+        "summary": summary,
+        "output": output_path.as_ref().map(|path| normalize_relative(root, path)),
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
+    let lensmaps = resolve_search_lensmap_paths(root, args);
+    if lensmaps.is_empty() {
+        emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+    }
+
+    let explicit_range = args.get("base").is_some() || args.get("head").is_some();
+    let base = args.get("base").unwrap_or("HEAD~1");
+    let head = args.get("head").unwrap_or("HEAD");
+    let (source_kind, changed_files) = if explicit_range {
+        (
+            "git_range".to_string(),
+            git_changed_files(root, base, head).unwrap_or_else(|| {
+                emit(
+                    json!({
+                        "ok": false,
+                        "type": "lensmap",
+                        "action": "pr_report",
+                        "error": "git_range_unavailable",
+                        "base": base,
+                        "head": head,
+                    }),
+                    1,
+                );
+            }),
+        )
+    } else {
+        let ranged = git_changed_files(root, base, head).unwrap_or_default();
+        if ranged.is_empty() {
+            ("worktree".to_string(), git_worktree_changed_files(root))
+        } else {
+            ("git_range".to_string(), ranged)
+        }
+    };
+
+    let candidate_changed_files = changed_files
+        .into_iter()
+        .filter(|file| SUPPORTED_EXTS.contains(&ext_of(Path::new(file)).as_str()))
+        .collect::<Vec<_>>();
+    let changed_set = candidate_changed_files
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let lensmap_entries = collect_repo_search_entries(root, &lensmaps)
+        .into_iter()
+        .filter(|entry| changed_set.contains(&entry.file))
+        .collect::<Vec<_>>();
+    let stale_after_days = lensmaps
+        .first()
+        .map(|lensmap| resolve_from_root(root, lensmap))
+        .map(|path| load_doc(&path, "group"))
+        .map(|doc| policy_for_doc(&doc).stale_after_days)
+        .unwrap_or_else(|| default_policy_settings().stale_after_days);
+
+    let mut grouped = BTreeMap::<String, Vec<SearchEntryRecord>>::new();
+    let mut stale_refs = vec![];
+    let mut unreviewed_refs = vec![];
+    for entry in lensmap_entries {
+        let review_status = entry
+            .review_status
+            .clone()
+            .unwrap_or_default()
+            .trim()
+            .to_lowercase();
+        let entry_record = EntryRecord {
+            ref_id: entry.ref_id.clone(),
+            file: entry.file.clone(),
+            anchor_id: entry.anchor_id.clone(),
+            kind: entry.kind.clone(),
+            text: entry.text.clone(),
+            title: entry.title.clone(),
+            owner: entry.owner.clone(),
+            author: entry.author.clone(),
+            scope: entry.scope.clone(),
+            template: entry.template.clone(),
+            review_status: entry.review_status.clone(),
+            review_due_at: entry.review_due_at.clone(),
+            updated_at: entry.updated_at.clone(),
+            tags: entry.tags.clone(),
+            created_at: None,
+            source: None,
+        };
+        if stale_after_days > 0 && entry_is_stale(&entry_record, stale_after_days) {
+            stale_refs.push(entry.ref_id.clone());
+        }
+        if review_status.is_empty()
+            || ["draft", "todo", "pending"].contains(&review_status.as_str())
+        {
+            unreviewed_refs.push(entry.ref_id.clone());
+        }
+        grouped.entry(entry.file.clone()).or_default().push(entry);
+    }
+    for entries in grouped.values_mut() {
+        entries.sort_by(|left, right| {
+            left.start_line
+                .unwrap_or(0)
+                .cmp(&right.start_line.unwrap_or(0))
+                .then_with(|| left.ref_id.cmp(&right.ref_id))
+        });
+    }
+
+    let uncovered_files = candidate_changed_files
+        .iter()
+        .filter(|file| !grouped.contains_key(*file))
+        .cloned()
+        .collect::<Vec<_>>();
+    let strict = args.has("strict");
+    let strict_failures = {
+        let mut failures = vec![];
+        if !uncovered_files.is_empty() {
+            failures.push("changed_files_without_notes".to_string());
+        }
+        if !stale_refs.is_empty() {
+            failures.push("stale_notes".to_string());
+        }
+        if !unreviewed_refs.is_empty() {
+            failures.push("unreviewed_notes".to_string());
+        }
+        failures
+    };
+
+    let output_path = if let Some(out) = args.get("out") {
+        resolve_from_root(root, out)
+    } else {
+        default_pr_report_output_path(root)
+    };
+    if !is_within_root(root, &output_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+    ensure_dir(&output_path);
+    let markdown = render_pr_report_markdown(PrReportRender {
+        base: Some(base),
+        head: Some(head),
+        source_kind: &source_kind,
+        changed_files: &candidate_changed_files,
+        grouped: &grouped,
+        stale_refs: &stale_refs,
+        unreviewed_refs: &unreviewed_refs,
+        uncovered_files: &uncovered_files,
+    });
+    let _ = fs::write(&output_path, markdown);
+
+    let ok = !strict || strict_failures.is_empty();
+    let out = json!({
+        "ok": ok,
+        "type": "lensmap",
+        "action": "pr_report",
+        "lensmaps": lensmaps,
+        "source_kind": source_kind,
+        "base": base,
+        "head": head,
+        "changed_files": candidate_changed_files,
+        "files_with_notes": grouped.len(),
+        "entry_count": grouped.values().map(|entries| entries.len()).sum::<usize>(),
+        "stale_refs": stale_refs,
+        "unreviewed_refs": unreviewed_refs,
+        "uncovered_files": uncovered_files,
+        "strict": strict,
+        "strict_failures": strict_failures,
+        "output": normalize_relative(root, &output_path),
         "ts": now_iso(),
     });
     append_history(root, &out);
@@ -5186,6 +6648,57 @@ fn default_show_output_path(lensmap_path: &Path) -> PathBuf {
     parent.join(format!("{}.show.md", stem))
 }
 
+fn render_filters_from_args<'a>(args: &'a ParsedArgs) -> RenderFilters<'a> {
+    RenderFilters {
+        file: args.get("file"),
+        symbol: args.get("symbol"),
+        ref_id: args.get("ref"),
+        kind: args.get("kind"),
+        owner: args.get("owner"),
+        template: args.get("template"),
+        review_status: args.get("review-status"),
+        scope: args.get("scope"),
+        tag: args.get("tag"),
+    }
+}
+
+fn search_filters_from_args<'a>(args: &'a ParsedArgs) -> SearchFilters<'a> {
+    SearchFilters {
+        file: args
+            .get("file")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        symbol: args
+            .get("symbol")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        kind: args
+            .get("kind")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        owner: args
+            .get("owner")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        template: args
+            .get("template")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        review_status: args
+            .get("review-status")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        scope: args
+            .get("scope")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+        tag: args
+            .get("tag")
+            .map(str::trim)
+            .filter(|value| !value.is_empty()),
+    }
+}
+
 fn build_render_lines(
     root: &Path,
     lensmap_path: &Path,
@@ -5222,6 +6735,14 @@ fn build_render_lines(
         .map(|v| v.trim().to_uppercase())
         .filter(|v| !v.is_empty());
     let kind_filter = filters.kind.map(str::trim).filter(|v| !v.is_empty());
+    let owner_filter = filters.owner.map(str::trim).filter(|v| !v.is_empty());
+    let template_filter = filters.template.map(str::trim).filter(|v| !v.is_empty());
+    let review_filter = filters
+        .review_status
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let scope_filter = filters.scope.map(str::trim).filter(|v| !v.is_empty());
+    let tag_filter = filters.tag.map(str::trim).filter(|v| !v.is_empty());
 
     let mut lines = vec![];
     lines.push(format!("# {}", title));
@@ -5244,6 +6765,19 @@ fn build_render_lines(
             .and_then(Value::as_str)
             .unwrap_or("external-doc-layer")
     ));
+    lines.push(format!(
+        "- {} {}",
+        tr("Boilerplate scope:", "样板范围："),
+        doc.metadata
+            .get("boilerplate_scope")
+            .and_then(Value::as_str)
+            .unwrap_or("knowledge")
+    ));
+    lines.push(format!(
+        "- {} `{}`",
+        tr("Artifact layers:", "产物层："),
+        artifact_layers_for_doc(doc).join(", ")
+    ));
     if let Some(file) = file_filter {
         lines.push(format!("- {} `{}`", tr("File filter:", "文件过滤："), file));
     }
@@ -5263,6 +6797,37 @@ fn build_render_lines(
     }
     if let Some(kind) = kind_filter {
         lines.push(format!("- {} `{}`", tr("Kind filter:", "类型过滤："), kind));
+    }
+    if let Some(owner) = owner_filter {
+        lines.push(format!(
+            "- {} `{}`",
+            tr("Owner filter:", "负责人过滤："),
+            owner
+        ));
+    }
+    if let Some(template) = template_filter {
+        lines.push(format!(
+            "- {} `{}`",
+            tr("Template filter:", "模板过滤："),
+            template
+        ));
+    }
+    if let Some(review) = review_filter {
+        lines.push(format!(
+            "- {} `{}`",
+            tr("Review filter:", "审核状态过滤："),
+            review
+        ));
+    }
+    if let Some(scope) = scope_filter {
+        lines.push(format!(
+            "- {} `{}`",
+            tr("Scope filter:", "范围过滤："),
+            scope
+        ));
+    }
+    if let Some(tag) = tag_filter {
+        lines.push(format!("- {} `{}`", tr("Tag filter:", "标签过滤："), tag));
     }
     lines.push(String::new());
 
@@ -5322,6 +6887,31 @@ fn build_render_lines(
         for entry in doc.entries.iter().filter(|entry| entry.file == rel) {
             if let Some(kind) = kind_filter {
                 if entry.kind.as_deref() != Some(kind) {
+                    continue;
+                }
+            }
+            if let Some(owner) = owner_filter {
+                if entry.owner.as_deref() != Some(owner) {
+                    continue;
+                }
+            }
+            if let Some(template) = template_filter {
+                if entry.template.as_deref() != Some(template) {
+                    continue;
+                }
+            }
+            if let Some(review) = review_filter {
+                if entry.review_status.as_deref() != Some(review) {
+                    continue;
+                }
+            }
+            if let Some(scope) = scope_filter {
+                if entry.scope.as_deref() != Some(scope) {
+                    continue;
+                }
+            }
+            if let Some(tag) = tag_filter {
+                if !entry.tags.iter().any(|candidate| candidate == tag) {
                     continue;
                 }
             }
@@ -5451,7 +7041,13 @@ fn build_render_lines(
                 entry.ref_id,
                 label,
                 entry.kind.unwrap_or_else(|| "comment".to_string()),
-                entry.text.unwrap_or_default().replace('\n', " ").trim()
+                entry.title.clone().unwrap_or_else(|| entry
+                    .text
+                    .clone()
+                    .unwrap_or_default()
+                    .replace('\n', " ")
+                    .trim()
+                    .to_string())
             ));
             lines.push(format!(
                 "  anchor=`{}` symbol=`{}` path=`{}` resolve=`{}`",
@@ -5463,6 +7059,37 @@ fn build_render_lines(
                     .unwrap_or_else(|| anchor.symbol.clone().unwrap_or_else(|| "?".to_string())),
                 resolution.strategy
             ));
+            let mut metadata_parts = vec![];
+            if let Some(owner) = &entry.owner {
+                metadata_parts.push(format!("owner=`{}`", owner));
+            }
+            if let Some(author) = &entry.author {
+                metadata_parts.push(format!("author=`{}`", author));
+            }
+            if let Some(scope) = &entry.scope {
+                metadata_parts.push(format!("scope=`{}`", scope));
+            }
+            if let Some(template) = &entry.template {
+                metadata_parts.push(format!("template=`{}`", template));
+            }
+            if let Some(review_status) = &entry.review_status {
+                metadata_parts.push(format!("review=`{}`", review_status));
+            }
+            if let Some(review_due_at) = &entry.review_due_at {
+                metadata_parts.push(format!("review_due=`{}`", review_due_at));
+            }
+            if let Some(updated_at) = &entry.updated_at {
+                metadata_parts.push(format!("updated=`{}`", updated_at));
+            }
+            if !entry.tags.is_empty() {
+                metadata_parts.push(format!("tags=`{}`", entry.tags.join(",")));
+            }
+            if !metadata_parts.is_empty() {
+                lines.push(format!("  {}", metadata_parts.join(" ")));
+            }
+            if let Some(text) = &entry.text {
+                lines.push(format!("  {}", text.replace('\n', " ").trim()));
+            }
 
             if let Some(start_line) = start {
                 let end_line = end.unwrap_or(start_line);
@@ -5508,16 +7135,17 @@ fn cmd_render(root: &Path, args: &ParsedArgs) {
     } else {
         default_render_output_path(&lensmap_path)
     };
+    if !is_within_root(root, &out_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
     let (lines, files_rendered, entries_rendered) = build_render_lines(
         root,
         &lensmap_path,
         &doc,
-        RenderFilters {
-            file: None,
-            symbol: None,
-            ref_id: None,
-            kind: None,
-        },
+        render_filters_from_args(args),
         &tr("LensMap Render", "LensMap 渲染视图"),
     );
 
@@ -5530,6 +7158,17 @@ fn cmd_render(root: &Path, args: &ParsedArgs) {
         "action": "render",
         "lensmap": normalize_relative(root, &lensmap_path),
         "output": normalize_relative(root, &out_path),
+        "filters": {
+            "file": args.get("file"),
+            "symbol": args.get("symbol"),
+            "ref": args.get("ref"),
+            "kind": args.get("kind"),
+            "owner": args.get("owner"),
+            "template": args.get("template"),
+            "review_status": args.get("review-status"),
+            "scope": args.get("scope"),
+            "tag": args.get("tag"),
+        },
         "files_rendered": files_rendered,
         "entries_rendered": entries_rendered,
         "ts": now_iso(),
@@ -5629,16 +7268,17 @@ fn cmd_show(root: &Path, args: &ParsedArgs) {
     } else {
         default_show_output_path(&lensmap_path)
     };
+    if !is_within_root(root, &out_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
     let (lines, files_rendered, entries_rendered) = build_render_lines(
         root,
         &lensmap_path,
         &doc,
-        RenderFilters {
-            file: args.get("file"),
-            symbol: args.get("symbol"),
-            ref_id: args.get("ref"),
-            kind: args.get("kind"),
-        },
+        render_filters_from_args(args),
         &tr("LensMap View", "LensMap 视图"),
     );
     ensure_dir(&out_path);
@@ -5653,6 +7293,11 @@ fn cmd_show(root: &Path, args: &ParsedArgs) {
         "symbol": args.get("symbol"),
         "ref": args.get("ref"),
         "kind": args.get("kind"),
+        "owner": args.get("owner"),
+        "template": args.get("template"),
+        "review_status": args.get("review-status"),
+        "scope": args.get("scope"),
+        "tag": args.get("tag"),
         "files_rendered": files_rendered,
         "entries_rendered": entries_rendered,
         "ts": now_iso(),
@@ -5677,25 +7322,70 @@ fn cmd_sync(root: &Path, args: &ParsedArgs) {
     let (removed_anchors, removed_entries) = simplify_doc_in_place(&mut doc);
     save_doc(&lensmap_path, doc.clone());
 
-    let out_path = if let Some(out) = args.get("to").or_else(|| args.get("out")) {
-        resolve_from_root(root, out)
-    } else {
-        default_render_output_path(&lensmap_path)
-    };
-    let (lines, files_rendered, entries_rendered) = build_render_lines(
-        root,
-        &lensmap_path,
-        &doc,
-        RenderFilters {
-            file: None,
-            symbol: None,
-            ref_id: None,
-            kind: None,
-        },
-        &tr("LensMap Render", "LensMap 渲染视图"),
-    );
-    ensure_dir(&out_path);
-    let _ = fs::write(&out_path, format!("{}\n", lines.join("\n")));
+    let artifact_layers = artifact_layers_for_doc(&doc);
+    let write_markdown = artifact_layers
+        .iter()
+        .any(|layer| layer == "readable-markdown")
+        || args.get("to").is_some()
+        || args.get("out").is_some();
+    let write_index =
+        artifact_layers.iter().any(|layer| layer == "search-index") || args.get("index").is_some();
+    let (canonical_path, default_markdown_path, default_index_path_rel) =
+        artifact_paths(root, &lensmap_path);
+
+    let mut markdown_output = None::<String>;
+    let mut files_rendered = 0usize;
+    let mut entries_rendered = 0usize;
+    if write_markdown {
+        let out_path = if let Some(out) = args.get("to").or_else(|| args.get("out")) {
+            resolve_from_root(root, out)
+        } else {
+            default_render_output_path(&lensmap_path)
+        };
+        if !is_within_root(root, &out_path) {
+            emit(
+                json!({"ok": false, "error": "security_output_outside_root"}),
+                1,
+            );
+        }
+        let (lines, rendered_files, rendered_entries) = build_render_lines(
+            root,
+            &lensmap_path,
+            &doc,
+            render_filters_from_args(args),
+            &tr("LensMap Render", "LensMap 渲染视图"),
+        );
+        ensure_dir(&out_path);
+        let _ = fs::write(&out_path, format!("{}\n", lines.join("\n")));
+        markdown_output = Some(normalize_relative(root, &out_path));
+        files_rendered = rendered_files;
+        entries_rendered = rendered_entries;
+    }
+
+    let mut index_output = None::<String>;
+    let mut index_entries = None::<usize>;
+    if write_index {
+        let index_path = if let Some(index) = args.get("index") {
+            resolve_from_root(root, index)
+        } else {
+            default_index_path(root)
+        };
+        if !is_within_root(root, &index_path) {
+            emit(
+                json!({"ok": false, "error": "security_output_outside_root"}),
+                1,
+            );
+        }
+        let entries = collect_repo_search_entries(root, &[normalize_relative(root, &lensmap_path)]);
+        let index_doc = make_index_doc(
+            root,
+            vec![normalize_relative(root, &lensmap_path)],
+            entries.clone(),
+        );
+        save_index_doc(&index_path, &index_doc);
+        index_output = Some(normalize_relative(root, &index_path));
+        index_entries = Some(entries.len());
+    }
 
     let ok = unresolved.is_empty();
     let out = json!({
@@ -5703,7 +7393,18 @@ fn cmd_sync(root: &Path, args: &ParsedArgs) {
         "type": "lensmap",
         "action": "sync",
         "lensmap": normalize_relative(root, &lensmap_path),
-        "output": normalize_relative(root, &out_path),
+        "artifacts": {
+            "canonical_json": canonical_path,
+            "readable_markdown": {
+                "path": default_markdown_path,
+                "output": markdown_output,
+            },
+            "search_index": {
+                "path": default_index_path_rel,
+                "output": index_output,
+                "entry_count": index_entries,
+            }
+        },
         "resolved": resolved,
         "inserted": inserted,
         "removed_anchors": removed_anchors,
@@ -5776,6 +7477,27 @@ fn cmd_search(root: &Path, args: &ParsedArgs) {
         .get("kind")
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    let owner_filter = args
+        .get("owner")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let template_filter = args
+        .get("template")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let review_filter = args
+        .get("review-status")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let scope_filter = args
+        .get("scope")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tag_filter = args
+        .get("tag")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let search_filters = search_filters_from_args(args);
 
     let index_path = args.get("index").map(|path| resolve_from_root(root, path));
     let (entries, source_kind, source_path) =
@@ -5800,9 +7522,7 @@ fn cmd_search(root: &Path, args: &ParsedArgs) {
 
     let mut scored = entries
         .into_iter()
-        .filter(|entry| {
-            search_entry_matches_filters(entry, file_filter, symbol_filter, kind_filter)
-        })
+        .filter(|entry| search_entry_matches_filters(entry, search_filters))
         .filter_map(|entry| {
             let score = search_entry_score(&entry, &query);
             if score > 0 {
@@ -5839,6 +7559,15 @@ fn cmd_search(root: &Path, args: &ParsedArgs) {
                 "anchor_id": entry.anchor_id,
                 "kind": entry.kind,
                 "text": entry.text,
+                "title": entry.title,
+                "owner": entry.owner,
+                "author": entry.author,
+                "scope": entry.scope,
+                "template": entry.template,
+                "review_status": entry.review_status,
+                "review_due_at": entry.review_due_at,
+                "updated_at": entry.updated_at,
+                "tags": entry.tags,
                 "symbol": entry.symbol,
                 "symbol_path": entry.symbol_path,
                 "start_line": entry.start_line,
@@ -5856,6 +7585,11 @@ fn cmd_search(root: &Path, args: &ParsedArgs) {
         "file": file_filter,
         "symbol": symbol_filter,
         "kind": kind_filter,
+        "owner": owner_filter,
+        "template": template_filter,
+        "review_status": review_filter,
+        "scope": scope_filter,
+        "tag": tag_filter,
         "source_kind": source_kind,
         "source_path": source_path,
         "total_matches": total_matches,
@@ -5966,7 +7700,33 @@ fn cmd_status(root: &Path, args: &ParsedArgs) {
             "git": {
                 "lensmap_dirty": git_is_dirty(root, &lensmap_rel),
                 "dirty_source_files": source_files.keys().filter(|rel| git_is_dirty(root, rel)).count(),
-            }
+            },
+            "positioning": metadata_string(&doc.metadata, "positioning", "external-doc-layer"),
+            "boilerplate_scope": metadata_string(&doc.metadata, "boilerplate_scope", "knowledge"),
+            "anchor_visibility": metadata_string(&doc.metadata, "editor_anchor_visibility", "dimmed"),
+            "artifact_layers": artifact_layers_for_doc(&doc),
+            "artifacts": {
+                "canonical_json": {
+                    "path": artifact_paths(root, &lensmap_path).0,
+                    "exists": lensmap_path.exists(),
+                },
+                "readable_markdown": {
+                    "path": artifact_paths(root, &lensmap_path).1,
+                    "exists": resolve_from_root(root, &artifact_paths(root, &lensmap_path).1).exists(),
+                },
+                "search_index": {
+                    "path": artifact_paths(root, &lensmap_path).2,
+                    "exists": resolve_from_root(root, &artifact_paths(root, &lensmap_path).2).exists(),
+                }
+            },
+            "policy": policy_for_doc(&doc),
+            "summary": summary_stats_to_value(
+                &summary_stats(
+                    &collect_doc_search_entries(root, &lensmap_path, &doc),
+                    policy_for_doc(&doc).stale_after_days,
+                ),
+                5,
+            ),
         }))
     } else {
         None
@@ -6088,6 +7848,15 @@ fn collect_doc_search_entries(
                 anchor_id,
                 kind: entry.kind.clone(),
                 text: entry.text.clone(),
+                title: entry.title.clone(),
+                owner: entry.owner.clone(),
+                author: entry.author.clone(),
+                scope: entry.scope.clone(),
+                template: entry.template.clone(),
+                review_status: entry.review_status.clone(),
+                review_due_at: entry.review_due_at.clone(),
+                updated_at: entry.updated_at.clone(),
+                tags: entry.tags.clone(),
                 symbol: anchor.as_ref().and_then(|item| item.symbol.clone()),
                 symbol_path: anchor.as_ref().and_then(|item| item.symbol_path.clone()),
                 start_line,
@@ -6113,24 +7882,44 @@ fn collect_repo_search_entries(root: &Path, lensmaps: &[String]) -> Vec<SearchEn
     out
 }
 
-fn search_entry_matches_filters(
-    entry: &SearchEntryRecord,
-    file_filter: Option<&str>,
-    symbol_filter: Option<&str>,
-    kind_filter: Option<&str>,
-) -> bool {
-    if let Some(file) = file_filter {
+fn search_entry_matches_filters(entry: &SearchEntryRecord, filters: SearchFilters<'_>) -> bool {
+    if let Some(file) = filters.file {
         if entry.file != file {
             return false;
         }
     }
-    if let Some(symbol) = symbol_filter {
+    if let Some(symbol) = filters.symbol {
         if entry.symbol.as_deref() != Some(symbol) && entry.symbol_path.as_deref() != Some(symbol) {
             return false;
         }
     }
-    if let Some(kind) = kind_filter {
+    if let Some(kind) = filters.kind {
         if entry.kind.as_deref() != Some(kind) {
+            return false;
+        }
+    }
+    if let Some(owner) = filters.owner {
+        if entry.owner.as_deref() != Some(owner) {
+            return false;
+        }
+    }
+    if let Some(template) = filters.template {
+        if entry.template.as_deref() != Some(template) {
+            return false;
+        }
+    }
+    if let Some(review) = filters.review_status {
+        if entry.review_status.as_deref() != Some(review) {
+            return false;
+        }
+    }
+    if let Some(scope) = filters.scope {
+        if entry.scope.as_deref() != Some(scope) {
+            return false;
+        }
+    }
+    if let Some(tag) = filters.tag {
+        if !entry.tags.iter().any(|candidate| candidate == tag) {
             return false;
         }
     }
@@ -6145,10 +7934,17 @@ fn search_entry_score(entry: &SearchEntryRecord, query: &str) -> i32 {
 
     let mut score = 0i32;
     let text = entry.text.as_deref().unwrap_or("").to_lowercase();
+    let title = entry.title.as_deref().unwrap_or("").to_lowercase();
     let symbol = entry.symbol.as_deref().unwrap_or("").to_lowercase();
     let symbol_path = entry.symbol_path.as_deref().unwrap_or("").to_lowercase();
     let file = entry.file.to_lowercase();
     let kind = entry.kind.as_deref().unwrap_or("").to_lowercase();
+    let owner = entry.owner.as_deref().unwrap_or("").to_lowercase();
+    let author = entry.author.as_deref().unwrap_or("").to_lowercase();
+    let scope = entry.scope.as_deref().unwrap_or("").to_lowercase();
+    let template = entry.template.as_deref().unwrap_or("").to_lowercase();
+    let review_status = entry.review_status.as_deref().unwrap_or("").to_lowercase();
+    let tags = entry.tags.join(" ").to_lowercase();
     let ref_id = entry.ref_id.to_lowercase();
 
     if ref_id == normalized_query {
@@ -6169,11 +7965,32 @@ fn search_entry_score(entry: &SearchEntryRecord, query: &str) -> i32 {
     if text.contains(&normalized_query) {
         score += 100;
     }
+    if title.contains(&normalized_query) {
+        score += 95;
+    }
     if file.contains(&normalized_query) {
         score += 80;
     }
     if kind == normalized_query {
         score += 70;
+    }
+    if owner.contains(&normalized_query) {
+        score += 60;
+    }
+    if author.contains(&normalized_query) {
+        score += 50;
+    }
+    if scope.contains(&normalized_query) {
+        score += 50;
+    }
+    if template == normalized_query {
+        score += 65;
+    }
+    if review_status == normalized_query {
+        score += 55;
+    }
+    if tags.contains(&normalized_query) {
+        score += 45;
     }
 
     for token in normalized_query.split_whitespace() {
@@ -6183,6 +8000,9 @@ fn search_entry_score(entry: &SearchEntryRecord, query: &str) -> i32 {
         if text.contains(token) {
             score += 16;
         }
+        if title.contains(token) {
+            score += 14;
+        }
         if symbol_path.contains(token) {
             score += 14;
         }
@@ -6190,6 +8010,12 @@ fn search_entry_score(entry: &SearchEntryRecord, query: &str) -> i32 {
             score += 8;
         }
         if ref_id.contains(token) {
+            score += 8;
+        }
+        if owner.contains(token) || author.contains(token) || scope.contains(token) {
+            score += 8;
+        }
+        if template.contains(token) || review_status.contains(token) || tags.contains(token) {
             score += 8;
         }
     }
@@ -6210,8 +8036,9 @@ fn usage() {
     println!(
         "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path] [--anchor-placement=inline|standalone] [--lang=en|zh-CN]"
     );
-    println!("lensmap annotate --lensmap=path (--ref=<HEX-start[-end]> | --file=path --symbol=name [--symbol-path=Outer.inner] [--offset=N] [--end-offset=M]) --text=<text> [--kind=comment|doc|todo|decision]");
+    println!("lensmap annotate --lensmap=path (--ref=<HEX-start[-end]> | --file=path --symbol=name [--symbol-path=Outer.inner] [--offset=N] [--end-offset=M]) (--text=<text> | --template=name) [--kind=comment|doc|todo|decision] [--owner=name] [--author=name] [--review-status=draft|in_review|approved] [--tags=a,b]");
     println!("lensmap template add <type>");
+    println!("lensmap template list");
     println!("lensmap scan [--lensmap=path] [--covers=a,b] [--anchor-mode=smart|all] [--anchor-placement=inline|standalone] [--dry-run]");
     println!("lensmap extract-comments [--lensmap=path] [--covers=a,b] [--dry-run]");
     println!(
@@ -6223,16 +8050,20 @@ fn usage() {
     );
     println!("lensmap unpackage [--bundle-dir=.lenspack] [--on-missing=prompt|skip|error] [--map=old_dir=new_dir] [--overwrite] [--dry-run]");
     println!("lensmap validate [--lensmap=path]");
+    println!("lensmap policy init [--lensmap=path] [--require-owner=true|false] [--require-author=true|false] [--require-template=true|false] [--require-review-status=true|false] [--stale-after-days=N] [--required-patterns=glob,glob]");
+    println!("lensmap policy check [--lensmap=path] [--fail-on-warnings]");
     println!("lensmap reanchor [--lensmap=path] [--dry-run]  # git-aware conflict protection on dirty overlaps");
-    println!("lensmap render [--lensmap=path] [--out=path]  # defaults to sibling .md");
+    println!("lensmap render [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--out=path]");
     println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
-    println!("lensmap show [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--out=path]");
+    println!("lensmap show [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--out=path]");
     println!("lensmap simplify [--lensmap=path]");
     println!("lensmap index [--lensmaps=a,b] [--index=path|--out=path]");
-    println!("lensmap search --query=<text> [--lensmaps=a,b] [--index=path] [--file=path] [--symbol=name|path] [--kind=comment|doc|todo|decision] [--limit=N]");
+    println!("lensmap search --query=<text> [--lensmaps=a,b] [--index=path] [--file=path] [--symbol=name|path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--limit=N]");
+    println!("lensmap summary [--lensmaps=a,b] [--file=path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--base=rev --head=rev] [--top=N] [--out=path]");
+    println!("lensmap pr report [--lensmaps=a,b] [--base=rev --head=rev] [--strict] [--out=path]");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
-    println!("lensmap sync [--lensmap=path] [--to=path]  # reanchor + simplify + render");
+    println!("lensmap sync [--lensmap=path] [--to=path] [--index=path]  # reanchor + simplify + artifact refresh");
     println!("lensmap expose --name=<lens_name>");
     println!("lensmap status [--lensmap=path]");
     println!();
@@ -6240,10 +8071,17 @@ fn usage() {
     println!("  lensmap init demo --mode=group --covers=demo/src");
     println!("  lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart");
     println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
-    println!("  lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --symbol-path=App.run --offset=1 --text=\"why this exists\"");
+    println!("  lensmap template list");
+    println!("  lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --symbol-path=App.run --offset=1 --template=architecture --owner=platform");
+    println!("  lensmap policy init --lensmap=demo/lensmap.json --require-owner=true --require-template=true --stale-after-days=30");
+    println!("  lensmap policy check --lensmap=demo/lensmap.json");
     println!("  lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts");
     println!("  lensmap index --index=demo/.lensmap-index.json");
     println!("  lensmap search --index=demo/.lensmap-index.json --query=why");
+    println!("  lensmap summary --lensmaps=demo/lensmap.json --owner=platform --out=demo/lensmap-summary.md");
+    println!(
+        "  lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict"
+    );
     println!("  lensmap merge --lensmap=demo/lensmap.json");
     println!("  lensmap unmerge --lensmap=demo/lensmap.json");
     println!("  lensmap package --bundle-dir=.lenspack");
@@ -6282,6 +8120,9 @@ fn main() {
         "template" if args.positional.get(1).map(String::as_str) == Some("add") => {
             cmd_template_add(&root, &args)
         }
+        "template" if args.positional.get(1).map(String::as_str) == Some("list") => {
+            cmd_template_list(&root)
+        }
         "scan" => cmd_scan(&root, &args),
         "extract-comments" => cmd_extract_comments(&root, &args),
         "unmerge" => cmd_extract_comments(&root, &args),
@@ -6289,6 +8130,12 @@ fn main() {
         "package" => cmd_package(&root, &args),
         "unpackage" => cmd_unpackage(&root, &args),
         "validate" => cmd_validate(&root, &args),
+        "policy" if args.positional.get(1).map(String::as_str) == Some("init") => {
+            cmd_policy_init(&root, &args)
+        }
+        "policy" if args.positional.get(1).map(String::as_str) == Some("check") => {
+            cmd_policy_check(&root, &args)
+        }
         "reanchor" => cmd_reanchor(&root, &args),
         "render" => cmd_render(&root, &args),
         "parse" => cmd_render(&root, &args),
@@ -6296,6 +8143,10 @@ fn main() {
         "simplify" => cmd_simplify(&root, &args),
         "index" => cmd_index(&root, &args),
         "search" => cmd_search(&root, &args),
+        "summary" => cmd_summary(&root, &args),
+        "pr" if args.positional.get(1).map(String::as_str) == Some("report") => {
+            cmd_pr_report(&root, &args)
+        }
         "polish" => cmd_polish(&root),
         "import" => cmd_import(&root, &args),
         "sync" => cmd_sync(&root, &args),
@@ -6572,5 +8423,134 @@ fn run(task: &str) -> bool {
             new_count: 2,
         }];
         assert_eq!(project_line_from_hunks(&hunks, 8), Some(10));
+    }
+
+    #[test]
+    fn collect_policy_findings_requires_metadata_and_flags_stale_entries() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_policy_{}", nonce));
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("app.rs"), "fn run() {}\n").unwrap();
+
+        let mut doc = make_lensmap_doc("group", vec!["src".to_string()]);
+        let policy = PolicySettings {
+            require_owner: true,
+            require_author: true,
+            require_template: true,
+            require_review_status: true,
+            stale_after_days: 1,
+            required_patterns: vec!["src/*.rs".to_string()],
+        };
+        store_policy(&mut doc.metadata, &policy);
+        doc.entries.push(EntryRecord {
+            ref_id: "ABCDEF-1".to_string(),
+            file: "src/app.rs".to_string(),
+            text: Some("Context:\nDecision:".to_string()),
+            updated_at: Some(
+                (Utc::now() - Duration::days(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            ),
+            ..EntryRecord::default()
+        });
+
+        let (_policy, errors, warnings) = collect_policy_findings(&root, &doc);
+        let error_codes = errors
+            .iter()
+            .map(|finding| finding.code.clone())
+            .collect::<HashSet<_>>();
+        let warning_codes = warnings
+            .iter()
+            .map(|finding| finding.code.clone())
+            .collect::<HashSet<_>>();
+        assert!(error_codes.contains("missing_owner"));
+        assert!(error_codes.contains("missing_author"));
+        assert!(error_codes.contains("missing_template"));
+        assert!(error_codes.contains("missing_review_status"));
+        assert!(warning_codes.contains("stale_entry"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_policy_findings_flags_required_patterns_without_notes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_policy_pattern_{}", nonce));
+        let src_dir = root.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("app.rs"), "fn run() {}\n").unwrap();
+
+        let mut doc = make_lensmap_doc("group", vec!["src".to_string()]);
+        let policy = PolicySettings {
+            required_patterns: vec!["src/*.rs".to_string()],
+            ..default_policy_settings()
+        };
+        store_policy(&mut doc.metadata, &policy);
+
+        let (_policy, errors, warnings) = collect_policy_findings(&root, &doc);
+        assert!(warnings.is_empty());
+        assert!(errors
+            .iter()
+            .any(|finding| finding.code == "required_pattern_missing_notes"));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn summary_stats_group_owner_template_scope_and_staleness() {
+        let stale_due =
+            (Utc::now() - Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let fresh_due =
+            (Utc::now() + Duration::days(7)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let entries = vec![
+            SearchEntryRecord {
+                lensmap: "demo/lensmap.json".to_string(),
+                file: "src/api/app.rs".to_string(),
+                ref_id: "ABCDEF-1".to_string(),
+                kind: Some("doc".to_string()),
+                title: Some("Architecture note".to_string()),
+                owner: Some("platform".to_string()),
+                author: Some("jay".to_string()),
+                scope: Some("src/api".to_string()),
+                template: Some("architecture".to_string()),
+                review_status: Some("approved".to_string()),
+                review_due_at: Some(stale_due),
+                updated_at: Some(now_iso()),
+                tags: vec!["architecture".to_string()],
+                ..SearchEntryRecord::default()
+            },
+            SearchEntryRecord {
+                lensmap: "demo/lensmap.json".to_string(),
+                file: "src/ui/view.rs".to_string(),
+                ref_id: "FEDCBA-2".to_string(),
+                kind: Some("todo".to_string()),
+                text: Some("Follow up".to_string()),
+                scope: Some("src/ui".to_string()),
+                template: Some("todo".to_string()),
+                review_status: Some("in_review".to_string()),
+                review_due_at: Some(fresh_due),
+                updated_at: Some(now_iso()),
+                tags: vec!["todo".to_string()],
+                ..SearchEntryRecord::default()
+            },
+        ];
+
+        let stats = summary_stats(&entries, 30);
+        assert_eq!(stats.entry_count, 2);
+        assert_eq!(stats.files_with_notes, 2);
+        assert_eq!(stats.stale_entries, 1);
+        assert_eq!(stats.by_owner.get("platform"), Some(&1));
+        assert_eq!(stats.by_owner.get("unassigned"), Some(&1));
+        assert_eq!(stats.by_template.get("architecture"), Some(&1));
+        assert_eq!(stats.by_template.get("todo"), Some(&1));
+        assert_eq!(stats.by_scope.get("src/api"), Some(&1));
+        assert_eq!(stats.by_scope.get("src/ui"), Some(&1));
+        assert_eq!(stats.by_directory.get("src/api"), Some(&1));
+        assert_eq!(stats.by_directory.get("src/ui"), Some(&1));
     }
 }
