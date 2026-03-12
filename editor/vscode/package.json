@@ -2,7 +2,7 @@
   "name": "lensmap-vscode",
   "displayName": "%lensmap.displayName%",
   "description": "%lensmap.description%",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "publisher": "protheuslabs",
   "license": "MIT",
   "homepage": "https://github.com/protheuslabs/Lensmap",
@@ -26,9 +26,12 @@
   "activationEvents": [
     "onCommand:lensmap.showFileNotes",
     "onCommand:lensmap.annotateAtCursor",
+    "onCommand:lensmap.editNoteAtCursor",
+    "onCommand:lensmap.editEntry",
     "onCommand:lensmap.refreshSidebar",
     "onCommand:lensmap.searchWorkspaceNotes",
     "onCommand:lensmap.revealEntry",
+    "onCommand:lensmap.revealEntryGroup",
     "onView:lensmapSidebar",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
@@ -69,6 +72,14 @@
         "title": "%command.annotateAtCursor%"
       },
       {
+        "command": "lensmap.editNoteAtCursor",
+        "title": "%command.editNoteAtCursor%"
+      },
+      {
+        "command": "lensmap.editEntry",
+        "title": "%command.editEntry%"
+      },
+      {
         "command": "lensmap.refreshSidebar",
         "title": "%command.refreshSidebar%"
       },
@@ -79,6 +90,10 @@
       {
         "command": "lensmap.revealEntry",
         "title": "%command.revealEntry%"
+      },
+      {
+        "command": "lensmap.revealEntryGroup",
+        "title": "%command.revealEntryGroup%"
       }
     ],
     "views": {
@@ -100,6 +115,30 @@
           "command": "lensmap.searchWorkspaceNotes",
           "when": "view == lensmapSidebar",
           "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "lensmap.editEntry",
+          "when": "view == lensmapSidebar && viewItem == lensmapEntry",
+          "group": "inline@1"
+        },
+        {
+          "command": "lensmap.revealEntry",
+          "when": "view == lensmapSidebar && viewItem == lensmapEntry",
+          "group": "inline@2"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "lensmap.annotateAtCursor",
+          "when": "editorLangId =~ /javascript|javascriptreact|typescript|typescriptreact|python|rust|go|java|c|cpp|csharp|kotlin/",
+          "group": "navigation@9"
+        },
+        {
+          "command": "lensmap.editNoteAtCursor",
+          "when": "editorLangId =~ /javascript|javascriptreact|typescript|typescriptreact|python|rust|go|java|c|cpp|csharp|kotlin/",
+          "group": "navigation@10"
         }
       ]
     },

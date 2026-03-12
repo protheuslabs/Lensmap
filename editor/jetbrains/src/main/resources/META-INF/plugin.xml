@@ -3,7 +3,7 @@
   <name>LensMap</name>
   <vendor email="support@lensmap.dev" url="https://github.com/protheuslabs/Lensmap">protheuslabs</vendor>
   <description><![CDATA[
-    JetBrains actions for showing, searching, and annotating LensMap notes.
+    JetBrains tool window and actions for showing, searching, annotating, and editing LensMap notes.
   ]]></description>
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">
@@ -28,11 +28,16 @@
               class="dev.lensmap.jetbrains.AnnotateAtCaretAction"
               text="Add Note at Caret"
               description="Create a LensMap note for the symbol near the caret"/>
+      <action id="LensMap.EditNoteAtCaret"
+              class="dev.lensmap.jetbrains.EditNoteAtCaretAction"
+              text="Edit Note at Caret"
+              description="Edit the LensMap note covering the caret location"/>
     </group>
     <group id="LensMap.EditorPopupGroup" text="LensMap" popup="true">
       <add-to-group group-id="EditorPopupMenu" anchor="last"/>
       <reference ref="LensMap.ShowFileNotes"/>
       <reference ref="LensMap.AnnotateAtCaret"/>
+      <reference ref="LensMap.EditNoteAtCaret"/>
     </group>
   </actions>
 </idea-plugin>

@@ -40,6 +40,7 @@ private const val TOOL_WINDOW_ID = "LensMap"
 private val TOOL_WINDOW_PANEL_KEY = Key.create<LensMapToolWindowPanel>("LensMap.ToolWindowPanel")
 
 private data class SearchEntry(
+    val lensmap: String,
     val ref: String,
     val file: String,
     val kind: String,
@@ -124,6 +125,7 @@ private fun parseResults(payload: JsonObject): List<SearchEntry> {
     return results.mapNotNull { element ->
         val item = element.asJsonObject
         SearchEntry(
+            lensmap = item.get("lensmap")?.asString.orEmpty(),
             ref = item.get("ref")?.asString.orEmpty(),
             file = item.get("file")?.asString.orEmpty(),
             kind = item.get("kind")?.asString ?: "comment",
@@ -212,12 +214,24 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
                 }
             }
         }
+        val editButton = JButton(t("Edit Note", "编辑注释")).apply {
+            addActionListener {
+                val editor = selectedEditor(project)
+                val file = selectedFile(project)
+                when {
+                    editor == null -> notify(project, t("Open an editor first.", "请先打开一个编辑器。"), NotificationType.WARNING)
+                    file == null -> notify(project, t("Open a file first.", "请先打开一个文件。"), NotificationType.WARNING)
+                    else -> editNoteAtCaret(project, editor, file)
+                }
+            }
+        }
 
         refreshButton.addActionListener { refreshAction?.invoke() }
 
         toolbar.add(currentFileButton)
         toolbar.add(searchButton)
         toolbar.add(annotateButton)
+        toolbar.add(editButton)
         toolbar.add(refreshButton)
 
         val header = JPanel(BorderLayout())
@@ -380,6 +394,12 @@ private fun showCurrentFileNotes(project: Project, virtualFile: VirtualFile) {
     }
 }
 
+private fun loadCurrentFileEntries(project: Project, virtualFile: VirtualFile): List<SearchEntry> {
+    val relative = relativeFile(project, virtualFile) ?: return emptyList()
+    val payload = LensMapCli.run(project, listOf("search", "--query=$relative", "--file=$relative", "--limit=200"))
+    return parseResults(payload)
+}
+
 private fun searchWorkspaceNotes(project: Project, query: String) {
     try {
         val payload = LensMapCli.run(project, listOf("search", "--query=$query", "--limit=80"))
@@ -391,6 +411,94 @@ private fun searchWorkspaceNotes(project: Project, query: String) {
         ) { searchWorkspaceNotes(project, query) }
     } catch (error: Throwable) {
         notify(project, error.message ?: t("LensMap search failed.", "LensMap 搜索失败。"), NotificationType.ERROR)
+    }
+}
+
+private fun selectEntry(project: Project, entries: List<SearchEntry>, title: String): SearchEntry? {
+    if (entries.isEmpty()) {
+        return null
+    }
+    if (entries.size == 1) {
+        return entries.first()
+    }
+    val labels = entries.map { entry ->
+        val line = when {
+            entry.startLine == null -> "?"
+            entry.endLine != null && entry.endLine != entry.startLine -> "${entry.startLine}-${entry.endLine}"
+            else -> "${entry.startLine}"
+        }
+        "${entry.symbolPath.ifBlank { entry.ref }} • ${entry.kind} • ${line}"
+    }.toTypedArray()
+    val index = Messages.showDialog(
+        project,
+        title,
+        TOOL_WINDOW_ID,
+        labels,
+        0,
+        null,
+    )
+    return entries.getOrNull(index)
+}
+
+private fun editEntry(project: Project, entry: SearchEntry) {
+    val projectRoot = projectRoot(project) ?: return
+    val lensmapRel = entry.lensmap.ifBlank {
+        notify(project, t("LensMap file is missing for this note.", "当前注释缺少对应的 LensMap 文件。"), NotificationType.ERROR)
+        return
+    }
+    val kind = promptKind(project) ?: return
+    val text = Messages.showMultilineInputDialog(
+        project,
+        t("LensMap note text", "LensMap 注释内容"),
+        t("Edit LensMap Note", "编辑 LensMap 注释"),
+        entry.text,
+        null,
+        null,
+    )?.trim().orEmpty()
+    if (text.isEmpty()) {
+        return
+    }
+
+    try {
+        LensMapCli.run(
+            project,
+            listOf(
+                "annotate",
+                "--lensmap=${projectRoot.resolve(lensmapRel).toString().replace('\\', '/')}",
+                "--ref=${entry.ref}",
+                "--file=${entry.file}",
+                "--kind=$kind",
+                "--text=$text",
+            ),
+        )
+        notify(project, t("LensMap note updated.", "LensMap 注释已更新。"))
+    } catch (error: Throwable) {
+        notify(project, error.message ?: t("LensMap edit failed.", "LensMap 编辑失败。"), NotificationType.ERROR)
+    }
+}
+
+private fun editNoteAtCaret(project: Project, editor: Editor, virtualFile: VirtualFile) {
+    try {
+        val entries = loadCurrentFileEntries(project, virtualFile)
+        val caretLine = editor.document.getLineNumber(editor.caretModel.offset) + 1
+        val candidates = entries.filter { entry ->
+            val start = entry.startLine ?: 0
+            val end = entry.endLine ?: entry.startLine ?: 0
+            caretLine in start..end
+        }
+        if (candidates.isEmpty()) {
+            annotateAtCaret(project, editor, virtualFile)
+            return
+        }
+        val picked = selectEntry(
+            project,
+            candidates,
+            t("Choose a LensMap note to edit.", "选择要编辑的 LensMap 注释。"),
+        ) ?: return
+        editEntry(project, picked)
+        showCurrentFileNotes(project, virtualFile)
+    } catch (error: Throwable) {
+        notify(project, error.message ?: t("LensMap edit failed.", "LensMap 编辑失败。"), NotificationType.ERROR)
     }
 }
 
@@ -487,5 +595,20 @@ class AnnotateAtCaretAction : AnAction() {
             return
         }
         annotateAtCaret(project, editor, virtualFile)
+    }
+}
+
+class EditNoteAtCaretAction : AnAction() {
+    override fun actionPerformed(e: AnActionEvent) {
+        val project = e.project ?: return
+        val editor = e.getData(CommonDataKeys.EDITOR) ?: selectedEditor(project) ?: run {
+            notify(project, t("Open an editor first.", "请先打开一个编辑器。"), NotificationType.WARNING)
+            return
+        }
+        val virtualFile = e.getData(CommonDataKeys.VIRTUAL_FILE) ?: selectedFile(project) ?: run {
+            notify(project, t("Open a file first.", "请先打开一个文件。"), NotificationType.WARNING)
+            return
+        }
+        editNoteAtCaret(project, editor, virtualFile)
     }
 }

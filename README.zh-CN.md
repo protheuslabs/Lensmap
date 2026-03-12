@@ -7,9 +7,12 @@ LensMap 是一个与代码绑定的外部文档层。它通过稳定的函数锚
 ## 当前能力
 
 - 为函数插入确定性的锚点注释：`@lensmap-anchor <HEXID>`
+- 默认将新锚点以内联注释形式放在符号所在行，只有在内联不安全时才回退为独立行
 - 使用 `<HEXID>-<offset>` 或 `<HEXID>-<start>-<end>` 引用外部注释
 - 通过源码锚点、AST 符号路径、指纹和行区间重新定位锚点
+- 以符号起始行为基准计算引用偏移，因此内联锚点和独立锚点保持同一套引用语义
 - 在大范围重构后，优先使用签名感知的模糊匹配修复锚点，再回退到行号提示
+- 在 `validate` / `reanchor` 中加入基于 Git 的脏区重叠与双向编辑冲突保护
 - 支持 JavaScript、TypeScript、Python、Rust、Go、Java、C、C++、C#、Kotlin 的 AST 解析
 - 支持构建仓库级索引，并通过 CLI 搜索 LensMap 条目
 - 将源码中的注释提取到 LensMap 文件
@@ -38,7 +41,7 @@ LensMap 是一个与代码绑定的外部文档层。它通过稳定的函数锚
 
 ```bash
 lensmap init demo --mode=group --covers=demo/src
-lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart
+lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart --anchor-placement=inline
 lensmap extract-comments --lensmap=demo/lensmap.json
 lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="Why this exists"
 lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
@@ -72,10 +75,14 @@ LENSMAP_LANG=en lensmap validate --lensmap=demo/lensmap.json
 
 - 显示当前文件的 LensMap 注释
 - 在光标处添加 LensMap 注释
+- 在光标处编辑已有的 LensMap 注释
 - Explorer 侧边栏中显示当前文件注释与工作区搜索结果
 - 在当前文件行尾显示 LensMap 注释提示
+- 弱化显示 `@lensmap-anchor`，降低锚点对阅读的干扰
+- 在代码行上显示用于查看/编辑注释的 CodeLens
 - `LensMap: Refresh Sidebar`
 - `LensMap: Search Workspace Notes`
+- 侧边栏条目可直接编辑
 - `@lensmap-anchor` / `@lensmap-ref` 悬停查看
 - 根据 VS Code 界面语言自动切换为英文或中文
 
@@ -97,6 +104,7 @@ npm run package:vsix
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
+- `LensMap > Edit Note at Caret`
 - 英文/中文提示与通知
 
 构建方式：

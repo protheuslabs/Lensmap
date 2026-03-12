@@ -8,6 +8,7 @@ use std::env;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
 use std::sync::OnceLock;
 use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
@@ -96,6 +97,8 @@ struct AnchorRecord {
     fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     signature_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    placement: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<String>,
 }
@@ -213,6 +216,7 @@ struct FunctionHit {
 struct AnchorLineMatch {
     id: String,
     marker: String,
+    is_inline: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -226,6 +230,20 @@ struct CommentStyle {
     line: &'static str,
     block_start: Option<&'static str>,
     block_end: Option<&'static str>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum AnchorPlacement {
+    Standalone,
+    Inline,
+}
+
+#[derive(Clone, Debug, Default)]
+struct GitHunk {
+    old_start: usize,
+    old_count: usize,
+    new_start: usize,
+    new_count: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -618,6 +636,15 @@ fn apply_default_metadata(metadata: &mut Map<String, Value>) {
         .entry("primary_artifact".to_string())
         .or_insert_with(|| Value::String("json+markdown".to_string()));
     metadata
+        .entry("anchor_placement".to_string())
+        .or_insert_with(|| Value::String("inline".to_string()));
+    metadata
+        .entry("editor_anchor_visibility".to_string())
+        .or_insert_with(|| Value::String("dimmed".to_string()));
+    metadata
+        .entry("git_reanchor_policy".to_string())
+        .or_insert_with(|| Value::String("protect-dirty-overlaps".to_string()));
+    metadata
         .entry("inline_keeps".to_string())
         .or_insert_with(|| {
             metadata_string_array(&[
@@ -637,6 +664,34 @@ fn apply_default_metadata(metadata: &mut Map<String, Value>) {
                 "generated explanations",
             ])
         });
+}
+
+fn parse_anchor_placement(raw: &str) -> Option<AnchorPlacement> {
+    match raw.trim().to_lowercase().as_str() {
+        "" => None,
+        "standalone" | "line" | "before" => Some(AnchorPlacement::Standalone),
+        "inline" | "eol" => Some(AnchorPlacement::Inline),
+        _ => None,
+    }
+}
+
+fn preferred_anchor_placement(
+    doc: &LensMapDoc,
+    args: Option<&ParsedArgs>,
+) -> Option<AnchorPlacement> {
+    if let Some(args) = args {
+        if let Some(parsed) = args
+            .get("anchor-placement")
+            .and_then(parse_anchor_placement)
+        {
+            return Some(parsed);
+        }
+    }
+    doc.metadata
+        .get("anchor_placement")
+        .and_then(Value::as_str)
+        .and_then(parse_anchor_placement)
+        .or(Some(AnchorPlacement::Inline))
 }
 
 fn make_lensmap_doc(mode: &str, covers: Vec<String>) -> LensMapDoc {
@@ -938,6 +993,164 @@ fn save_doc(path: &Path, mut doc: LensMapDoc) {
             serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string())
         ),
     );
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    Some(stdout)
+}
+
+fn git_diff_text(root: &Path, rel: &str) -> Option<String> {
+    let with_head = git_output(root, &["diff", "--unified=0", "HEAD", "--", rel]);
+    if with_head.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+        return with_head;
+    }
+    let working = git_output(root, &["diff", "--unified=0", "--", rel]);
+    if working.as_ref().map(|s| !s.is_empty()).unwrap_or(false) {
+        return working;
+    }
+    None
+}
+
+fn parse_diff_hunks(diff: &str) -> Vec<GitHunk> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@").unwrap());
+    diff.lines()
+        .filter_map(|line| {
+            let cap = re.captures(line)?;
+            Some(GitHunk {
+                old_start: cap.get(1)?.as_str().parse::<usize>().ok()?,
+                old_count: cap
+                    .get(2)
+                    .and_then(|m| m.as_str().parse::<usize>().ok())
+                    .unwrap_or(1),
+                new_start: cap.get(3)?.as_str().parse::<usize>().ok()?,
+                new_count: cap
+                    .get(4)
+                    .and_then(|m| m.as_str().parse::<usize>().ok())
+                    .unwrap_or(1),
+            })
+        })
+        .collect()
+}
+
+fn git_dirty_hunks(root: &Path, rel: &str) -> Vec<GitHunk> {
+    git_diff_text(root, rel)
+        .map(|text| parse_diff_hunks(&text))
+        .unwrap_or_default()
+}
+
+fn git_dirty_ranges(root: &Path, rel: &str) -> Vec<(usize, usize)> {
+    git_dirty_hunks(root, rel)
+        .into_iter()
+        .map(|hunk| {
+            let start = hunk.new_start.max(1);
+            let len = hunk.new_count.max(1);
+            let end = start + len.saturating_sub(1);
+            (start, end)
+        })
+        .collect()
+}
+
+fn git_is_dirty(root: &Path, rel: &str) -> bool {
+    !git_dirty_hunks(root, rel).is_empty()
+}
+
+fn git_project_line(root: &Path, rel: &str, old_line: usize) -> Option<usize> {
+    if old_line == 0 {
+        return None;
+    }
+    let hunks = git_dirty_hunks(root, rel);
+    if hunks.is_empty() {
+        return None;
+    }
+    project_line_from_hunks(&hunks, old_line)
+}
+
+fn project_line_from_hunks(hunks: &[GitHunk], old_line: usize) -> Option<usize> {
+    if old_line == 0 {
+        return None;
+    }
+    if hunks.is_empty() {
+        return Some(old_line);
+    }
+
+    let mut delta: isize = 0;
+    for hunk in hunks {
+        if old_line < hunk.old_start {
+            return Some((old_line as isize + delta).max(1) as usize);
+        }
+
+        let old_end = hunk.old_start + hunk.old_count.saturating_sub(1);
+        if hunk.old_count > 0 && old_line <= old_end {
+            let offset = old_line.saturating_sub(hunk.old_start);
+            let mapped = hunk.new_start + offset.min(hunk.new_count.saturating_sub(1));
+            return Some(mapped.max(1));
+        }
+
+        delta += hunk.new_count as isize - hunk.old_count as isize;
+    }
+
+    Some((old_line as isize + delta).max(1) as usize)
+}
+
+fn git_projected_function_hit(
+    root: &Path,
+    rel: &str,
+    anchor: &AnchorRecord,
+    functions: &[FunctionHit],
+) -> Option<FunctionHit> {
+    let original_line = anchor
+        .line_symbol
+        .or(anchor.span_start)
+        .or(anchor.line_anchor)?;
+    let projected_line = git_project_line(root, rel, original_line)?;
+    let candidate = functions
+        .iter()
+        .min_by_key(|f| (f.line_index + 1).abs_diff(projected_line))
+        .cloned()?;
+    if (candidate.line_index + 1).abs_diff(projected_line) <= 6 {
+        return Some(candidate);
+    }
+    None
+}
+
+fn line_overlaps_dirty_ranges(line: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| line >= *start && line <= *end)
+}
+
+fn anchor_focus_lines(anchor: &AnchorRecord) -> Vec<usize> {
+    let mut lines = vec![];
+    if let (Some(start), Some(end)) = (anchor.span_start, anchor.span_end) {
+        for line in start..=end {
+            lines.push(line);
+        }
+        return lines;
+    }
+    if let Some(line) = anchor.line_symbol {
+        lines.push(line);
+    }
+    if let Some(line) = anchor.line_anchor {
+        lines.push(line);
+    }
+    lines
+}
+
+fn anchor_overlaps_dirty_ranges(anchor: &AnchorRecord, ranges: &[(usize, usize)]) -> bool {
+    anchor_focus_lines(anchor)
+        .into_iter()
+        .any(|line| line_overlaps_dirty_ranges(line, ranges))
 }
 
 fn default_index_path(root: &Path) -> PathBuf {
@@ -1771,16 +1984,37 @@ fn detect_functions(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
     regex_hits
 }
 
-fn parse_anchor_line(line: &str) -> Option<AnchorLineMatch> {
+fn parse_anchor_marker_comment(comment: &str) -> Option<AnchorLineMatch> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         Regex::new(r"^\s*(//|#)\s*@lensmap-anchor\s+([A-Fa-f0-9]{6,16})\b").unwrap()
     });
-    let cap = re.captures(line)?;
+    let cap = re.captures(comment)?;
     Some(AnchorLineMatch {
         marker: cap.get(1)?.as_str().to_string(),
         id: cap.get(2)?.as_str().to_uppercase(),
+        is_inline: false,
     })
+}
+
+fn parse_anchor_line(line: &str) -> Option<AnchorLineMatch> {
+    if let Some(parsed) = parse_anchor_marker_comment(line) {
+        return Some(parsed);
+    }
+    for marker in ["//", "#"] {
+        let Some(idx) = find_line_comment_index_outside_strings(line, marker) else {
+            continue;
+        };
+        let prefix_raw = &line[..idx];
+        if prefix_raw.trim().is_empty() {
+            continue;
+        }
+        let comment = &line[idx..];
+        let mut parsed = parse_anchor_marker_comment(comment)?;
+        parsed.is_inline = true;
+        return Some(parsed);
+    }
+    None
 }
 
 fn anchor_match(line: &str, expected_marker: Option<&str>) -> Option<AnchorLineMatch> {
@@ -1818,11 +2052,11 @@ fn ref_match(line: &str, expected_marker: Option<&str>) -> Option<RefLineMatch> 
 fn collect_anchor_nodes(
     lines: &[String],
     expected_marker: Option<&str>,
-) -> Vec<(String, String, usize)> {
+) -> Vec<(String, String, usize, bool)> {
     let mut out = vec![];
     for (i, line) in lines.iter().enumerate() {
         if let Some(m) = anchor_match(line, expected_marker) {
-            out.push((m.id, m.marker, i));
+            out.push((m.id, m.marker, i, m.is_inline));
         }
     }
     out
@@ -1852,7 +2086,14 @@ fn find_anchor_before_function(
     lines: &[String],
     fn_line: usize,
     style: &CommentStyle,
-) -> Option<(String, String, usize)> {
+) -> Option<(String, String, usize, bool)> {
+    if fn_line < lines.len() {
+        if let Some(m) = anchor_match(&lines[fn_line], None) {
+            if m.is_inline {
+                return Some((m.id, m.marker, fn_line, true));
+            }
+        }
+    }
     let mut i = fn_line;
     while i > 0 {
         i -= 1;
@@ -1861,7 +2102,7 @@ fn find_anchor_before_function(
             continue;
         }
         if let Some(m) = anchor_match(&lines[i], None) {
-            return Some((m.id, m.marker, i));
+            return Some((m.id, m.marker, i, m.is_inline));
         }
         if is_comment_like_line(trimmed, style) {
             continue;
@@ -1916,6 +2157,56 @@ fn make_anchor_line(indent: &str, marker: &str, id: &str) -> String {
     format!("{}{} {} {}", indent, marker, ANCHOR_TAG, id)
 }
 
+fn make_inline_anchor_line(line: &str, marker: &str, id: &str) -> String {
+    format!("{} {} {} {}", line.trim_end(), marker, ANCHOR_TAG, id)
+}
+
+fn can_place_inline_anchor(line: &str, marker: &str) -> bool {
+    if anchor_match(line, None).is_some() {
+        return false;
+    }
+    if ref_match(line, None).is_some() {
+        return false;
+    }
+    find_line_comment_index_outside_strings(line, marker).is_none()
+}
+
+fn rewrite_anchor_on_line(line: &str, expected_marker: &str, id: &str) -> String {
+    if let Some(parsed) = parse_anchor_line(line) {
+        if parsed.is_inline {
+            if let Some(idx) = find_line_comment_index_outside_strings(line, &parsed.marker) {
+                return make_inline_anchor_line(&line[..idx], expected_marker, id);
+            }
+        }
+    }
+    let indent = line
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect::<String>();
+    make_anchor_line(&indent, expected_marker, id)
+}
+
+fn place_anchor_for_function(
+    lines: &mut Vec<String>,
+    fn_hit: &FunctionHit,
+    style: &CommentStyle,
+    id: &str,
+    placement: AnchorPlacement,
+) -> usize {
+    if placement == AnchorPlacement::Inline
+        && fn_hit.line_index < lines.len()
+        && can_place_inline_anchor(&lines[fn_hit.line_index], style.line)
+    {
+        lines[fn_hit.line_index] =
+            make_inline_anchor_line(&lines[fn_hit.line_index], style.line, id);
+        return fn_hit.line_index;
+    }
+
+    let insert_at = compute_anchor_insert_index(lines, fn_hit.line_index, style);
+    lines.insert(insert_at, make_anchor_line(&fn_hit.indent, style.line, id));
+    insert_at
+}
+
 fn make_ref_line(indent: &str, marker: &str, ref_id: &str) -> String {
     format!("{}{} {} {}", indent, marker, REF_TAG, ref_id)
 }
@@ -1945,8 +2236,12 @@ fn materialize_anchors_for_file(root: &Path, abs: &Path, lines: &[String]) -> Ve
     let anchors = collect_anchor_nodes(lines, Some(style.line));
     let mut out = vec![];
 
-    for (id, _marker, line_idx) in anchors {
-        let fn_hit = functions.iter().find(|f| f.line_index > line_idx);
+    for (id, _marker, line_idx, is_inline) in anchors {
+        let fn_hit = if is_inline {
+            functions.iter().find(|f| f.line_index == line_idx)
+        } else {
+            functions.iter().find(|f| f.line_index > line_idx)
+        };
         out.push(AnchorRecord {
             id,
             file: rel.clone(),
@@ -1958,6 +2253,11 @@ fn materialize_anchors_for_file(root: &Path, abs: &Path, lines: &[String]) -> Ve
             span_end: fn_hit.map(|f| f.span_end_index + 1),
             fingerprint: fn_hit.map(|f| f.fingerprint.clone()),
             signature_text: fn_hit.map(|f| f.signature_text.clone()),
+            placement: Some(if is_inline {
+                "inline".to_string()
+            } else {
+                "standalone".to_string()
+            }),
             updated_at: Some(now_iso()),
         });
     }
@@ -1992,6 +2292,7 @@ fn ensure_anchor_for_symbol(
     }
 
     let style = comment_style_for(&abs);
+    let placement = preferred_anchor_placement(doc, None).unwrap_or(AnchorPlacement::Inline);
     let mut lines = split_lines(&fs::read_to_string(&abs).unwrap_or_default());
     let functions = detect_functions(&lines, &abs);
     let rel = normalize_relative(root, &abs);
@@ -2047,15 +2348,11 @@ fn ensure_anchor_for_symbol(
     }
     let fn_hit = candidates.remove(0);
 
-    if let Some((id, marker, line_idx)) =
+    if let Some((id, marker, line_idx, _is_inline)) =
         find_anchor_before_function(&lines, fn_hit.line_index, &style)
     {
         if marker != style.line {
-            let indent = lines[line_idx]
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .collect::<String>();
-            lines[line_idx] = make_anchor_line(&indent, style.line, &id);
+            lines[line_idx] = rewrite_anchor_on_line(&lines[line_idx], style.line, &id);
             let _ = fs::write(&abs, join_lines(&lines));
         }
         let materialized = materialize_anchors_for_file(root, &abs, &lines);
@@ -2076,12 +2373,11 @@ fn ensure_anchor_for_symbol(
         .chain(
             collect_anchor_nodes(&lines, Some(style.line))
                 .into_iter()
-                .map(|(id, _, _)| id),
+                .map(|(id, _, _, _)| id),
         )
         .collect();
     let id = generate_anchor_id(&existing_ids);
-    let insert_at = compute_anchor_insert_index(&lines, fn_hit.line_index, &style);
-    lines.insert(insert_at, make_anchor_line(&fn_hit.indent, style.line, &id));
+    place_anchor_for_function(&mut lines, &fn_hit, &style, &id, placement);
     fs::write(&abs, join_lines(&lines))
         .map_err(|e| format!("anchor_insert_failed:{}:{}", rel, e))?;
 
@@ -2113,6 +2409,67 @@ fn parse_ref(ref_id: &str) -> Option<RefParts> {
         start,
         end,
     })
+}
+
+fn anchor_symbol_line_index(
+    anchor: &AnchorRecord,
+    resolution: Option<&AnchorResolution>,
+) -> Option<usize> {
+    if let Some(line) =
+        resolution.and_then(|resolved| resolved.function_hit.as_ref().map(|f| f.line_index))
+    {
+        return Some(line);
+    }
+    anchor.line_symbol.map(|line| line.saturating_sub(1))
+}
+
+fn anchor_reference_base_line_index(
+    anchor: &AnchorRecord,
+    resolution: Option<&AnchorResolution>,
+) -> Option<usize> {
+    if let Some(symbol_line) = anchor_symbol_line_index(anchor, resolution) {
+        return Some(symbol_line);
+    }
+    if let Some(anchor_line) = resolution.and_then(|resolved| resolved.anchor_line_index) {
+        return Some(anchor_line);
+    }
+    anchor.line_anchor.map(|line| line.saturating_sub(1))
+}
+
+fn entry_line_indexes(
+    anchor: &AnchorRecord,
+    resolution: Option<&AnchorResolution>,
+    parts: &RefParts,
+) -> Option<(usize, usize)> {
+    let base = anchor_reference_base_line_index(anchor, resolution)?;
+    if anchor_symbol_line_index(anchor, resolution).is_some() {
+        Some((
+            base + parts.start.saturating_sub(1),
+            base + parts.end.saturating_sub(1),
+        ))
+    } else {
+        Some((base + parts.start, base + parts.end))
+    }
+}
+
+fn ref_offsets_for_block(
+    anchor: &AnchorRecord,
+    resolution: Option<&AnchorResolution>,
+    start_line_index: usize,
+    end_line_index: usize,
+) -> Option<(usize, usize)> {
+    if end_line_index < start_line_index {
+        return None;
+    }
+    let base = anchor_reference_base_line_index(anchor, resolution)?;
+    if start_line_index < base {
+        return None;
+    }
+    if anchor_symbol_line_index(anchor, resolution).is_some() {
+        Some((start_line_index - base + 1, end_line_index - base + 1))
+    } else {
+        Some((start_line_index - base, end_line_index - base))
+    }
 }
 
 fn canonical_ref_id(parts: &RefParts) -> String {
@@ -2313,8 +2670,14 @@ fn resolve_anchor_in_lines(
 ) -> AnchorResolution {
     let id = anchor.id.to_uppercase();
     let nodes = collect_anchor_nodes(lines, Some(style.line));
-    if let Some((_nid, _marker, line_idx)) = nodes.iter().find(|(nid, _, _)| nid == &id) {
-        let fn_hit = fns.iter().find(|f| f.line_index > *line_idx).cloned();
+    if let Some((_nid, _marker, line_idx, is_inline)) =
+        nodes.iter().find(|(nid, _, _, _)| nid == &id)
+    {
+        let fn_hit = if *is_inline {
+            fns.iter().find(|f| f.line_index == *line_idx).cloned()
+        } else {
+            fns.iter().find(|f| f.line_index > *line_idx).cloned()
+        };
         return AnchorResolution {
             anchor_line_index: Some(*line_idx),
             function_hit: fn_hit,
@@ -2432,7 +2795,7 @@ fn resolve_anchor_in_lines(
     }
 
     let anchor_line_index = if let Some(fn_hit) = &candidate {
-        if let Some((_existing, _marker, line_idx)) =
+        if let Some((_existing, _marker, line_idx, _is_inline)) =
             find_anchor_before_function(lines, fn_hit.line_index, style)
         {
             Some(line_idx)
@@ -2524,11 +2887,11 @@ fn line_comment_lines(indent: &str, marker: &str, text: &str) -> Vec<String> {
 }
 
 fn find_latest_anchor_for_line(
-    nodes: &[(String, String, usize)],
+    nodes: &[(String, String, usize, bool)],
     line_idx: usize,
 ) -> Option<(String, usize)> {
     let mut out: Option<(String, usize)> = None;
-    for (id, _marker, idx) in nodes {
+    for (id, _marker, idx, _is_inline) in nodes {
         if *idx <= line_idx {
             out = Some((id.clone(), *idx));
         } else {
@@ -2992,6 +3355,29 @@ fn cmd_init(root: &Path, args: &ParsedArgs) {
 
     let lens_path = resolve_lensmap_path(root, args, Some(&project_dir));
     let mut doc = make_lensmap_doc(mode, covers);
+    if let Some(raw) = args.get("anchor-placement") {
+        if let Some(parsed) = parse_anchor_placement(raw) {
+            doc.metadata.insert(
+                "anchor_placement".to_string(),
+                Value::String(match parsed {
+                    AnchorPlacement::Inline => "inline".to_string(),
+                    AnchorPlacement::Standalone => "standalone".to_string(),
+                }),
+            );
+        } else {
+            emit(
+                json!({
+                    "ok": false,
+                    "type": "lensmap",
+                    "action": "init",
+                    "error": "invalid_anchor_placement",
+                    "anchor_placement": raw,
+                    "allowed": ["inline", "standalone"],
+                }),
+                1,
+            );
+        }
+    }
     doc.metadata
         .insert("project".to_string(), Value::String(project.clone()));
     save_doc(&lens_path, doc.clone());
@@ -3072,6 +3458,23 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
     let dry_run = args.has("dry-run");
     let lensmap_path = resolve_lensmap_path(root, args, None);
     let mut doc = load_doc(&lensmap_path, "group");
+    let anchor_placement = if let Some(raw) = args.get("anchor-placement") {
+        parse_anchor_placement(raw).unwrap_or_else(|| {
+            emit(
+                json!({
+                    "ok": false,
+                    "type": "lensmap",
+                    "action": "scan",
+                    "error": "invalid_anchor_placement",
+                    "anchor_placement": raw,
+                    "allowed": ["inline", "standalone"],
+                }),
+                1,
+            );
+        })
+    } else {
+        preferred_anchor_placement(&doc, Some(args)).unwrap_or(AnchorPlacement::Inline)
+    };
     let anchor_mode = args
         .get("anchor-mode")
         .or_else(|| {
@@ -3158,16 +3561,12 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
         let mut i = 0usize;
         while i < functions.len() {
             let fn_hit = functions[i].clone();
-            if let Some((id, marker, line_idx)) =
+            if let Some((id, marker, line_idx, _is_inline)) =
                 find_anchor_before_function(&lines, fn_hit.line_index, &style)
             {
                 existing_ids.insert(id.clone());
                 if marker != style.line {
-                    let indent = lines[line_idx]
-                        .chars()
-                        .take_while(|c| c.is_whitespace())
-                        .collect::<String>();
-                    lines[line_idx] = make_anchor_line(&indent, style.line, &id);
+                    lines[line_idx] = rewrite_anchor_on_line(&lines[line_idx], style.line, &id);
                 }
                 i += 1;
                 continue;
@@ -3199,7 +3598,7 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
                 i += 1;
                 continue;
             }
-            lines.insert(insert_at, make_anchor_line(&fn_hit.indent, style.line, &id));
+            place_anchor_for_function(&mut lines, &fn_hit, &style, &id, anchor_placement);
             added += 1;
             functions = detect_functions(&lines, &abs);
             i = 0;
@@ -3261,6 +3660,10 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
         "dry_run": dry_run,
         "lensmap": normalize_relative(root, &lensmap_path),
         "anchor_mode": anchor_mode,
+        "anchor_placement": match anchor_placement {
+            AnchorPlacement::Inline => "inline",
+            AnchorPlacement::Standalone => "standalone",
+        },
         "files_scanned": files.len(),
         "anchors_added": added_total,
         "anchors_total": doc.anchors.len(),
@@ -3318,6 +3721,10 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
         let mut lines = split_lines(&text);
         let mut anchor_nodes = collect_anchor_nodes(&lines, Some(style.line));
         anchor_nodes.sort_by(|a, b| a.2.cmp(&b.2));
+        let anchor_lookup = materialize_anchors_for_file(root, &abs, &lines)
+            .into_iter()
+            .map(|anchor| (anchor.id.to_uppercase(), anchor))
+            .collect::<HashMap<_, _>>();
 
         let blocks = collect_comment_blocks(&lines, &abs);
         let mut extracted = 0usize;
@@ -3328,12 +3735,17 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
             if latest.is_none() {
                 continue;
             }
-            let (anchor_id, anchor_line) = latest.unwrap();
-            if block.start < anchor_line || block.end < block.start {
+            let (anchor_id, _anchor_line) = latest.unwrap();
+            let anchor = if let Some(anchor) = anchor_lookup.get(&anchor_id.to_uppercase()) {
+                anchor
+            } else {
                 continue;
-            }
-            let start_offset = block.start - anchor_line;
-            let end_offset = block.end - anchor_line;
+            };
+            let Some((start_offset, end_offset)) =
+                ref_offsets_for_block(anchor, None, block.start, block.end)
+            else {
+                continue;
+            };
             let ref_id = if start_offset == end_offset {
                 format!("{}-{}", anchor_id, start_offset)
             } else {
@@ -4296,6 +4708,8 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
     }
 
     let doc = load_doc(&lensmap_path, "group");
+    let lensmap_rel = normalize_relative(root, &lensmap_path);
+    let lensmap_dirty = git_is_dirty(root, &lensmap_rel);
     let mut errors = vec![];
     let mut warnings = vec![];
 
@@ -4338,12 +4752,11 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
         let lines = split_lines(&content);
         let fns = detect_functions(&lines, &abs);
         let resolution = resolve_anchor_in_lines(anchor, &lines, &fns, &style);
-        let anchor_line = if let Some(anchor_line) = resolution.anchor_line_index {
-            anchor_line
-        } else {
+        if resolution.anchor_line_index.is_none() {
             errors.push(format!("anchor_unresolved:{}:{}", id, anchor.file));
             continue;
-        };
+        }
+        let anchor_line = resolution.anchor_line_index.unwrap_or_default();
 
         if !resolution.anchor_found_in_source {
             warnings.push(format!(
@@ -4368,9 +4781,21 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
             }
         }
 
+        let dirty_ranges = git_dirty_ranges(root, &anchor.file);
+        if !dirty_ranges.is_empty() {
+            if anchor_overlaps_dirty_ranges(anchor, &dirty_ranges)
+                && !resolution.anchor_found_in_source
+            {
+                warnings.push(format!("git_dirty_overlap:{}:{}", id, anchor.file));
+            }
+            if lensmap_dirty {
+                warnings.push(format!("git_dual_edit_conflict:{}:{}", id, anchor.file));
+            }
+        }
+
         if let Some(fn_hit) = resolution
             .function_hit
-            .or_else(|| fns.iter().find(|f| f.line_index > anchor_line).cloned())
+            .or_else(|| fns.iter().find(|f| f.line_index >= anchor_line).cloned())
         {
             if let Some(symbol_path) = &anchor.symbol_path {
                 if symbol_path != &fn_hit.symbol_path {
@@ -4453,14 +4878,15 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
         let lines = split_lines(&fs::read_to_string(&abs).unwrap_or_default());
         let fns = detect_functions(&lines, &abs);
         let resolution = resolve_anchor_in_lines(anchor, &lines, &fns, &style);
-        let anchor_line = if let Some(anchor_line) = resolution.anchor_line_index {
-            anchor_line
-        } else {
+        if resolution.anchor_line_index.is_none() {
             warnings.push(format!("entry_anchor_unresolved:{}", entry.ref_id));
             continue;
+        }
+        let Some((start_line, end_line)) = entry_line_indexes(anchor, Some(&resolution), &parsed)
+        else {
+            warnings.push(format!("entry_line_out_of_range:{}", entry.ref_id));
+            continue;
         };
-        let start_line = anchor_line + parsed.start;
-        let end_line = anchor_line + parsed.end;
 
         if start_line >= lines.len() || end_line >= lines.len() {
             warnings.push(format!("entry_line_out_of_range:{}", entry.ref_id));
@@ -4483,6 +4909,9 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
         "type": "lensmap",
         "action": "validate",
         "lensmap": normalize_relative(root, &lensmap_path),
+        "git": {
+            "lensmap_dirty": lensmap_dirty,
+        },
         "errors": errors,
         "warnings": warnings,
         "stats": {
@@ -4496,10 +4925,17 @@ fn cmd_validate(root: &Path, args: &ParsedArgs) {
     emit(out, if ok { 0 } else { 1 });
 }
 
-fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usize, Vec<Value>) {
+fn reanchor_doc(
+    root: &Path,
+    doc: &mut LensMapDoc,
+    dry_run: bool,
+    lensmap_dirty: bool,
+) -> (usize, usize, Vec<Value>) {
     let mut unresolved: Vec<Value> = vec![];
     let mut resolved = 0usize;
     let mut inserted = 0usize;
+    let preferred_placement =
+        preferred_anchor_placement(doc, None).unwrap_or(AnchorPlacement::Inline);
 
     let mut file_to_indices: HashMap<String, Vec<usize>> = HashMap::new();
     for (idx, anchor) in doc.anchors.iter().enumerate() {
@@ -4525,6 +4961,8 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
         let style = comment_style_for(&abs);
         let mut lines = split_lines(&fs::read_to_string(&abs).unwrap_or_default());
         let mut file_changed = false;
+        let dirty_ranges = git_dirty_ranges(root, &file);
+        let source_dirty = !dirty_ranges.is_empty();
 
         for idx in indices {
             let id = doc.anchors[idx].id.to_uppercase();
@@ -4564,8 +5002,22 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
                 continue;
             }
 
+            if source_dirty && anchor_overlaps_dirty_ranges(&doc.anchors[idx], &dirty_ranges) {
+                unresolved.push(json!({
+                    "id": id,
+                    "reason": if lensmap_dirty { "git_dual_edit_conflict" } else { "git_dirty_overlap" },
+                    "file": file,
+                    "strategy": resolution.strategy,
+                }));
+                continue;
+            }
+
             let fn_hit = if let Some(fn_hit) = resolution.function_hit.clone() {
                 fn_hit
+            } else if let Some(projected) =
+                git_projected_function_hit(root, &file, &doc.anchors[idx], &functions)
+            {
+                projected
             } else {
                 unresolved.push(json!({
                     "id": id,
@@ -4575,7 +5027,7 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
                 continue;
             };
 
-            if let Some((existing, marker, line_idx)) =
+            if let Some((existing, marker, line_idx, _is_inline)) =
                 find_anchor_before_function(&lines, fn_hit.line_index, &style)
             {
                 if existing != id {
@@ -4587,18 +5039,11 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
                     continue;
                 }
                 if marker != style.line {
-                    let indent = lines[line_idx]
-                        .chars()
-                        .take_while(|c| c.is_whitespace())
-                        .collect::<String>();
-                    lines[line_idx] = make_anchor_line(&indent, style.line, &id);
+                    lines[line_idx] = rewrite_anchor_on_line(&lines[line_idx], style.line, &id);
                     file_changed = true;
                 }
             } else {
-                let insert_at = resolution.anchor_line_index.unwrap_or_else(|| {
-                    compute_anchor_insert_index(&lines, fn_hit.line_index, &style)
-                });
-                lines.insert(insert_at, make_anchor_line(&fn_hit.indent, style.line, &id));
+                place_anchor_for_function(&mut lines, &fn_hit, &style, &id, preferred_placement);
                 file_changed = true;
                 inserted += 1;
             }
@@ -4659,7 +5104,9 @@ fn cmd_reanchor(root: &Path, args: &ParsedArgs) {
     }
 
     let mut doc = load_doc(&lensmap_path, "group");
-    let (resolved, inserted, unresolved) = reanchor_doc(root, &mut doc, dry_run);
+    let lensmap_rel = normalize_relative(root, &lensmap_path);
+    let lensmap_dirty = git_is_dirty(root, &lensmap_rel);
+    let (resolved, inserted, unresolved) = reanchor_doc(root, &mut doc, dry_run, lensmap_dirty);
 
     if !dry_run {
         save_doc(&lensmap_path, doc.clone());
@@ -4672,6 +5119,9 @@ fn cmd_reanchor(root: &Path, args: &ParsedArgs) {
         "action": "reanchor",
         "dry_run": dry_run,
         "lensmap": normalize_relative(root, &lensmap_path),
+        "git": {
+            "lensmap_dirty": lensmap_dirty,
+        },
         "resolved": resolved,
         "inserted": inserted,
         "unresolved": unresolved,
@@ -4902,10 +5352,9 @@ fn build_render_lines(
                 .or_insert_with(|| {
                     resolve_anchor_in_lines(anchor, &file_lines, &functions, &style)
                 });
-            let start = resolution
-                .anchor_line_index
-                .map(|idx| idx + parsed.start + 1);
-            let end = resolution.anchor_line_index.map(|idx| idx + parsed.end + 1);
+            let (start, end) = entry_line_indexes(anchor, Some(&*resolution), &parsed)
+                .map(|(start, end)| (Some(start + 1), Some(end + 1)))
+                .unwrap_or((None, None));
             file_entries.push((
                 entry.clone(),
                 anchor.clone(),
@@ -5222,7 +5671,9 @@ fn cmd_sync(root: &Path, args: &ParsedArgs) {
     }
 
     let mut doc = load_doc(&lensmap_path, "group");
-    let (resolved, inserted, unresolved) = reanchor_doc(root, &mut doc, false);
+    let lensmap_rel = normalize_relative(root, &lensmap_path);
+    let lensmap_dirty = git_is_dirty(root, &lensmap_rel);
+    let (resolved, inserted, unresolved) = reanchor_doc(root, &mut doc, false, lensmap_dirty);
     let (removed_anchors, removed_entries) = simplify_doc_in_place(&mut doc);
     save_doc(&lensmap_path, doc.clone());
 
@@ -5494,12 +5945,28 @@ fn cmd_status(root: &Path, args: &ParsedArgs) {
 
     let lensmap_stats = if lensmap_path.exists() {
         let doc = load_doc(&lensmap_path, "group");
+        let lensmap_rel = normalize_relative(root, &lensmap_path);
+        let mut source_files = BTreeMap::new();
+        for anchor in &doc.anchors {
+            if !anchor.file.is_empty() {
+                source_files.insert(anchor.file.clone(), true);
+            }
+        }
+        for entry in &doc.entries {
+            if !entry.file.is_empty() {
+                source_files.insert(entry.file.clone(), true);
+            }
+        }
         Some(json!({
             "lensmap": normalize_relative(root, &lensmap_path),
             "mode": doc.mode,
             "covers": doc.covers.len(),
             "anchors": doc.anchors.len(),
             "entries": doc.entries.len(),
+            "git": {
+                "lensmap_dirty": git_is_dirty(root, &lensmap_rel),
+                "dirty_source_files": source_files.keys().filter(|rel| git_is_dirty(root, rel)).count(),
+            }
         }))
     } else {
         None
@@ -5598,14 +6065,20 @@ fn collect_doc_search_entries(
                 None
             });
             let start_line = parsed.as_ref().and_then(|parts| {
-                resolution
-                    .as_ref()
-                    .and_then(|found| found.anchor_line_index.map(|idx| idx + parts.start + 1))
+                resolution.as_ref().and_then(|found| {
+                    anchor
+                        .as_ref()
+                        .and_then(|anchor| entry_line_indexes(anchor, Some(found), parts))
+                        .map(|(start, _end)| start + 1)
+                })
             });
             let end_line = parsed.as_ref().and_then(|parts| {
-                resolution
-                    .as_ref()
-                    .and_then(|found| found.anchor_line_index.map(|idx| idx + parts.end + 1))
+                resolution.as_ref().and_then(|found| {
+                    anchor
+                        .as_ref()
+                        .and_then(|anchor| entry_line_indexes(anchor, Some(found), parts))
+                        .map(|(_start, end)| end + 1)
+                })
             });
 
             out.push(SearchEntryRecord {
@@ -5735,11 +6208,11 @@ fn usage() {
     );
     println!();
     println!(
-        "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path] [--lang=en|zh-CN]"
+        "lensmap init <project> [--mode=group|file] [--covers=a,b] [--file=path] [--lensmap=path] [--anchor-placement=inline|standalone] [--lang=en|zh-CN]"
     );
     println!("lensmap annotate --lensmap=path (--ref=<HEX-start[-end]> | --file=path --symbol=name [--symbol-path=Outer.inner] [--offset=N] [--end-offset=M]) --text=<text> [--kind=comment|doc|todo|decision]");
     println!("lensmap template add <type>");
-    println!("lensmap scan [--lensmap=path] [--covers=a,b] [--anchor-mode=smart|all] [--dry-run]");
+    println!("lensmap scan [--lensmap=path] [--covers=a,b] [--anchor-mode=smart|all] [--anchor-placement=inline|standalone] [--dry-run]");
     println!("lensmap extract-comments [--lensmap=path] [--covers=a,b] [--dry-run]");
     println!(
         "lensmap unmerge [--lensmap=path] [--covers=a,b] [--dry-run]  # alias of extract-comments"
@@ -5750,7 +6223,7 @@ fn usage() {
     );
     println!("lensmap unpackage [--bundle-dir=.lenspack] [--on-missing=prompt|skip|error] [--map=old_dir=new_dir] [--overwrite] [--dry-run]");
     println!("lensmap validate [--lensmap=path]");
-    println!("lensmap reanchor [--lensmap=path] [--dry-run]");
+    println!("lensmap reanchor [--lensmap=path] [--dry-run]  # git-aware conflict protection on dirty overlaps");
     println!("lensmap render [--lensmap=path] [--out=path]  # defaults to sibling .md");
     println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
     println!("lensmap show [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--out=path]");
@@ -6020,6 +6493,7 @@ impl Worker {
             span_end: Some(5),
             fingerprint: None,
             signature_text: Some("fn run(&self, task: &Task) -> Result<(), String> {".to_string()),
+            placement: Some("standalone".to_string()),
             updated_at: None,
         };
 
@@ -6047,5 +6521,56 @@ fn run(task: &str) -> bool {
             Some("fn run(task: &str) -> bool {")
         );
         let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn materialize_anchors_detects_inline_anchor_placement() {
+        let source = r#"fn run(task: &str) -> bool { // @lensmap-anchor ABCDEF
+    !task.is_empty()
+}
+"#;
+        let (path, lines) = write_temp_source(".rs", "worker_inline_anchor", source);
+        let root = path.parent().unwrap_or_else(|| Path::new("."));
+        let anchors = materialize_anchors_for_file(root, &path, &lines);
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(anchors[0].placement.as_deref(), Some("inline"));
+        assert_eq!(anchors[0].line_anchor, Some(1));
+        assert_eq!(anchors[0].line_symbol, Some(1));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn entry_line_indexes_use_symbol_relative_offsets() {
+        let anchor = AnchorRecord {
+            id: "ABCDEF".to_string(),
+            file: "demo.rs".to_string(),
+            symbol: Some("run".to_string()),
+            symbol_path: Some("Worker.run".to_string()),
+            line_anchor: Some(10),
+            line_symbol: Some(10),
+            span_start: Some(10),
+            span_end: Some(12),
+            fingerprint: None,
+            signature_text: Some("fn run() {".to_string()),
+            placement: Some("inline".to_string()),
+            updated_at: None,
+        };
+        let parts = RefParts {
+            anchor_id: "ABCDEF".to_string(),
+            start: 1,
+            end: 3,
+        };
+        assert_eq!(entry_line_indexes(&anchor, None, &parts), Some((9, 11)));
+    }
+
+    #[test]
+    fn project_line_from_hunks_tracks_insertions_before_anchor() {
+        let hunks = vec![GitHunk {
+            old_start: 3,
+            old_count: 0,
+            new_start: 3,
+            new_count: 2,
+        }];
+        assert_eq!(project_line_from_hunks(&hunks, 8), Some(10));
     }
 }

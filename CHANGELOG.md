@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.9
+- Switched new anchors to inline placement by default, with standalone fallback when inline comments are unsafe for the source line.
+- Normalized ref math to symbol-relative offsets so inline and standalone anchors preserve the same reference semantics.
+- Added git-aware validate/reanchor protection for dirty overlap and dual-edit conflict cases, plus git dirty summary in `status`.
+- Expanded the VS Code integration with edit-at-cursor, entry editing, anchor dimming, and inline code lenses.
+- Expanded the JetBrains plugin with `Edit Note at Caret` and tool-window editing flow parity.
+
 ## 0.3.8
 - Upgraded the JetBrains plugin from action-only dialogs to a persistent `LensMap` tool window with refreshable current-file and search output.
 - Kept the JetBrains current-file, workspace-search, and caret-annotation actions, but routed their output through the tool window.

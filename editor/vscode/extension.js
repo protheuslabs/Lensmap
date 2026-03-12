@@ -23,7 +23,9 @@ const WORKSPACE_SEARCH_LIMIT = 80;
 let sidebarProvider = null;
 let sidebarView = null;
 let noteDecorationType = null;
+let anchorDecorationType = null;
 let refreshTimer = null;
+let codeLensEmitter = null;
 
 function isChineseLocale() {
   return String(vscode.env.language || "").toLowerCase().startsWith("zh");
@@ -180,20 +182,38 @@ function activate(context) {
     },
     rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
   });
+  anchorDecorationType = vscode.window.createTextEditorDecorationType({
+    color: new vscode.ThemeColor("editorCodeLens.foreground"),
+    opacity: "0.45",
+    fontStyle: "italic",
+    rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+  });
+  codeLensEmitter = new vscode.EventEmitter();
 
   context.subscriptions.push(
     sidebarView,
     noteDecorationType,
+    anchorDecorationType,
+    codeLensEmitter,
     vscode.commands.registerCommand("lensmap.showFileNotes", showFileNotes),
     vscode.commands.registerCommand("lensmap.annotateAtCursor", annotateAtCursor),
+    vscode.commands.registerCommand("lensmap.editNoteAtCursor", editNoteAtCursor),
+    vscode.commands.registerCommand("lensmap.editEntry", editEntry),
     vscode.commands.registerCommand("lensmap.refreshSidebar", async () => {
       await refreshLensmapUi(vscode.window.activeTextEditor);
     }),
     vscode.commands.registerCommand("lensmap.searchWorkspaceNotes", searchWorkspaceNotes),
     vscode.commands.registerCommand("lensmap.revealEntry", revealEntry),
+    vscode.commands.registerCommand("lensmap.revealEntryGroup", revealEntryGroup),
     vscode.languages.registerHoverProvider(SUPPORTED_LANGUAGES, {
       provideHover(document, position) {
         return provideLensmapHover(document, position);
+      },
+    }),
+    vscode.languages.registerCodeLensProvider(SUPPORTED_LANGUAGES, {
+      onDidChangeCodeLenses: codeLensEmitter.event,
+      provideCodeLenses(document) {
+        return provideLensmapCodeLenses(document);
       },
     }),
     vscode.window.onDidChangeActiveTextEditor((editor) => scheduleRefresh(editor)),
@@ -231,17 +251,22 @@ function scheduleRefresh(editor) {
 async function refreshLensmapUi(editor) {
   const entries = await sidebarProvider.refresh(editor);
   applyDecorations(editor || vscode.window.activeTextEditor, entries);
+  if (codeLensEmitter) {
+    codeLensEmitter.fire();
+  }
 }
 
 function applyDecorations(editor, entries) {
-  if (!editor || !noteDecorationType || !isSupportedDocument(editor.document)) {
-    if (editor && noteDecorationType) {
+  if (!editor || !noteDecorationType || !anchorDecorationType || !isSupportedDocument(editor.document)) {
+    if (editor && noteDecorationType && anchorDecorationType) {
       editor.setDecorations(noteDecorationType, []);
+      editor.setDecorations(anchorDecorationType, []);
     }
     return;
   }
 
   const decorations = [];
+  const anchorDecorations = [];
   for (const entry of entries) {
     if (!entry.start_line) {
       continue;
@@ -264,6 +289,19 @@ function applyDecorations(editor, entries) {
     });
   }
   editor.setDecorations(noteDecorationType, decorations);
+
+  for (let line = 0; line < editor.document.lineCount; line += 1) {
+    const text = editor.document.lineAt(line).text;
+    const match = text.match(/(?:\/\/|#)\s*@lensmap-anchor\s+[A-Fa-f0-9]{6,16}\b/);
+    if (!match || match.index === undefined) {
+      continue;
+    }
+    anchorDecorations.push({
+      range: new vscode.Range(line, match.index, line, match.index + match[0].length),
+      hoverMessage: t("LensMap anchor", "LensMap 锚点"),
+    });
+  }
+  editor.setDecorations(anchorDecorationType, anchorDecorations);
 }
 
 async function showFileNotes() {
@@ -370,6 +408,31 @@ async function annotateAtCursor() {
   }
 }
 
+async function editNoteAtCursor() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage(t("LensMap needs an active editor.", "LensMap 需要一个当前激活的编辑器。"));
+    return;
+  }
+
+  const entries = await ensureCurrentFileEntries(editor);
+  const cursorLine = editor.selection.active.line + 1;
+  const candidates = entries.filter((entry) => {
+    const start = entry.start_line || 0;
+    const end = entry.end_line || entry.start_line || 0;
+    return cursorLine >= start && cursorLine <= end;
+  });
+  if (candidates.length === 0) {
+    await annotateAtCursor();
+    return;
+  }
+  if (candidates.length === 1) {
+    await editEntry(candidates[0]);
+    return;
+  }
+  await editEntryGroup(candidates);
+}
+
 async function searchWorkspaceNotes() {
   const workspaceRoot = getWorkspaceRootFromActiveEditor() || getAnyWorkspaceRoot();
   if (!workspaceRoot) {
@@ -409,6 +472,130 @@ async function revealEntry(entry) {
   const position = new vscode.Position(targetLine, 0);
   editor.selection = new vscode.Selection(position, position);
   editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+}
+
+async function revealEntryGroup(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return;
+  }
+  if (entries.length === 1) {
+    await revealEntry(entries[0]);
+    return;
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    entries.map((entry) => ({
+      label: entry.symbol_path || entry.ref,
+      description: `${localizedKind(entry.kind)} • ${formatEntryLine(entry)}`,
+      detail: truncate(entry.text || "", 100),
+      entry,
+    })),
+    {
+      title: t("Choose a LensMap note", "选择一个 LensMap 注释"),
+      canPickMany: false,
+      ignoreFocusOut: true,
+    },
+  );
+  if (picked?.entry) {
+    await revealEntry(picked.entry);
+  }
+}
+
+async function editEntryGroup(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return;
+  }
+  if (entries.length === 1) {
+    await editEntry(entries[0]);
+    return;
+  }
+
+  const picked = await vscode.window.showQuickPick(
+    entries.map((entry) => ({
+      label: entry.symbol_path || entry.ref,
+      description: `${localizedKind(entry.kind)} • ${formatEntryLine(entry)}`,
+      detail: truncate(entry.text || "", 100),
+      entry,
+    })),
+    {
+      title: t("Edit which LensMap note?", "要编辑哪个 LensMap 注释？"),
+      canPickMany: false,
+      ignoreFocusOut: true,
+    },
+  );
+  if (picked?.entry) {
+    await editEntry(picked.entry);
+  }
+}
+
+async function editEntry(entry) {
+  if (!entry || !entry.ref) {
+    return;
+  }
+
+  const workspaceRoot = entry.workspaceRoot || getWorkspaceRootFromActiveEditor() || getAnyWorkspaceRoot();
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage(
+      t("Open a workspace before editing LensMap notes.", "编辑 LensMap 注释前请先打开工作区。"),
+    );
+    return;
+  }
+
+  const kind = await vscode.window.showQuickPick(
+    [
+      { label: localizedKind("comment"), value: "comment" },
+      { label: localizedKind("doc"), value: "doc" },
+      { label: localizedKind("todo"), value: "todo" },
+      { label: localizedKind("decision"), value: "decision" },
+    ],
+    {
+      title: t(`LensMap kind for ${entry.ref}`, `${entry.ref} 的 LensMap 类型`),
+      canPickMany: false,
+      ignoreFocusOut: true,
+      placeHolder: localizedKind(entry.kind || "comment"),
+    },
+  );
+  if (!kind) {
+    return;
+  }
+
+  const text = await vscode.window.showInputBox({
+    prompt: t(`Edit LensMap note ${entry.ref}`, `编辑 LensMap 注释 ${entry.ref}`),
+    value: entry.text || "",
+    ignoreFocusOut: true,
+  });
+  if (!text || !text.trim()) {
+    return;
+  }
+
+  const lensmapPath = entry.lensmap
+    ? path.join(workspaceRoot, fromPosix(entry.lensmap))
+    : null;
+  if (!lensmapPath) {
+    vscode.window.showErrorMessage(
+      t("LensMap could not resolve the backing lensmap file.", "LensMap 无法定位对应的 lensmap 文件。"),
+    );
+    return;
+  }
+
+  try {
+    await runLensmap(workspaceRoot, [
+      "annotate",
+      `--lensmap=${lensmapPath}`,
+      `--ref=${entry.ref}`,
+      `--file=${entry.file}`,
+      `--kind=${kind.value}`,
+      `--text=${text.trim()}`,
+    ]);
+    await refreshLensmapUi(vscode.window.activeTextEditor);
+    vscode.window.showInformationMessage(
+      t(`LensMap note ${entry.ref} updated.`, `LensMap 注释 ${entry.ref} 已更新。`),
+    );
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      t(`LensMap edit failed: ${error.message}`, `LensMap 编辑失败：${error.message}`),
+    );
+  }
 }
 
 async function provideLensmapHover(document, position) {
@@ -553,6 +740,66 @@ function formatEntryLine(entry) {
       : `line ${entry.start_line}-${entry.end_line}`;
   }
   return isChineseLocale() ? `第 ${entry.start_line} 行` : `line ${entry.start_line}`;
+}
+
+async function ensureCurrentFileEntries(editor) {
+  if (!editor) {
+    return [];
+  }
+  const snapshot = await loadCurrentFileEntries(editor);
+  if (sidebarProvider) {
+    sidebarProvider.currentFileEntries = snapshot.entries;
+    sidebarProvider.currentFileTarget = snapshot.label;
+    sidebarProvider.currentFileLabel = snapshot.message;
+  }
+  return snapshot.entries;
+}
+
+function provideLensmapCodeLenses(document) {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor || editor.document.uri.toString() !== document.uri.toString()) {
+    return [];
+  }
+
+  const grouped = groupEntriesByLine(sidebarProvider?.currentFileEntries || []);
+  const out = [];
+  for (const [line, entries] of grouped.entries()) {
+    const zeroLine = Math.max(line - 1, 0);
+    const range = new vscode.Range(zeroLine, 0, zeroLine, 0);
+    const noteTitle = entries.length === 1
+      ? t("LensMap: 1 note", "LensMap：1 条注释")
+      : t(`LensMap: ${entries.length} notes`, `LensMap：${entries.length} 条注释`);
+    out.push(
+      new vscode.CodeLens(range, {
+        command: "lensmap.revealEntryGroup",
+        title: noteTitle,
+        arguments: [entries],
+      }),
+    );
+    out.push(
+      new vscode.CodeLens(range, {
+        command: entries.length === 1 ? "lensmap.editEntry" : "lensmap.editNoteAtCursor",
+        title: entries.length === 1
+          ? t("Edit LensMap note", "编辑 LensMap 注释")
+          : t("Edit notes here", "编辑此处注释"),
+        arguments: entries.length === 1 ? [entries[0]] : [],
+      }),
+    );
+  }
+  return out;
+}
+
+function groupEntriesByLine(entries) {
+  const grouped = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    if (!entry.start_line) {
+      continue;
+    }
+    const bucket = grouped.get(entry.start_line) || [];
+    bucket.push(entry);
+    grouped.set(entry.start_line, bucket);
+  }
+  return grouped;
 }
 
 function buildEntryTooltip(entry) {

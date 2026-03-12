@@ -3,9 +3,12 @@
   "lensmap.description": "Editor integration for LensMap code-linked documentation.",
   "command.showFileNotes": "LensMap: Show Notes for Current File",
   "command.annotateAtCursor": "LensMap: Add Note at Cursor",
+  "command.editNoteAtCursor": "LensMap: Edit Note at Cursor",
+  "command.editEntry": "LensMap: Edit LensMap Note",
   "command.refreshSidebar": "LensMap: Refresh Sidebar",
   "command.searchWorkspaceNotes": "LensMap: Search Workspace Notes",
   "command.revealEntry": "LensMap: Reveal Note Location",
+  "command.revealEntryGroup": "LensMap: Reveal Note Group",
   "view.sidebar": "LensMap",
   "config.command.description": "Optional LensMap executable path. Leave empty to auto-detect local cargo-run or use lensmap on PATH.",
   "config.extraArgs.description": "Additional arguments to prepend when invoking LensMap."

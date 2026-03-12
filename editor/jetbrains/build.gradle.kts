@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "dev.lensmap"
-version = "0.3.1"
+version = "0.3.2"
 
 repositories {
     mavenCentral()
@@ -28,7 +28,7 @@ tasks {
     patchPluginXml {
         sinceBuild.set("213")
         untilBuild.set("241.*")
-        changeNotes.set("Adds a persistent LensMap tool window alongside the current-file, search, and annotate actions.")
+        changeNotes.set("Adds inline editing flow parity with an Edit Note at Caret action and tool-window editing support.")
     }
 
     withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {

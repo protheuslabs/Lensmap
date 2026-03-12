@@ -12,9 +12,12 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 ## What it does
 
 - Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
+- Places new anchors inline on the symbol line by default, with standalone fallback when inline placement is unsafe.
 - Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
 - Resolves anchors using source anchor ID first, then AST-backed symbol path and fingerprint metadata, then stored line/span hints.
+- Keeps refs symbol-relative so inline and standalone anchors resolve the same way.
 - Repairs large refactors with signature-aware fuzzy matching before falling back to line hints.
+- Adds git-aware validate/reanchor protection for dirty overlap and dual-edit conflict cases.
 - Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin.
 - Builds a searchable repo-wide note index and supports structured CLI search.
 - Extracts inline/source comments into lens entries.
@@ -77,7 +80,7 @@ LENSMAP_LANG=en ./target/release/lensmap validate --lensmap=demo/lensmap.json
 
 ```bash
 lensmap init demo --mode=group --covers=demo/src
-lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart
+lensmap scan --lensmap=demo/lensmap.json --anchor-mode=smart --anchor-placement=inline
 lensmap extract-comments --lensmap=demo/lensmap.json
 lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --offset=1 --text="Why this exists"
 lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts
@@ -133,14 +136,14 @@ lensmap validate --lensmap=demo/lensmap.json
 - `init`
 - `annotate`
 - `template add`
-- `scan`
+- `scan` (`--anchor-placement=inline|standalone`)
 - `extract-comments`
 - `unmerge` (alias of `extract-comments`)
 - `merge` (hydrate comments back into code from lensmap entries)
 - `package` (collect lensmap files into one root bundle directory with a manifest map)
 - `unpackage` (restore packaged lensmap files back to original dirs, with `prompt|skip|error` handling for missing dirs)
 - `validate`
-- `reanchor`
+- `reanchor` (git-aware dirty-overlap protection)
 - `render` (writes readable Markdown; defaults to a sibling `.md`)
 - `parse` (alias of `render`)
 - `show` (filtered readable view by file, symbol, ref, or kind)
@@ -188,10 +191,14 @@ Current capabilities:
 
 - `LensMap: Show Notes for Current File`
 - `LensMap: Add Note at Cursor`
+- `LensMap: Edit Note at Cursor`
 - Explorer sidebar with current-file notes and workspace search results
 - Inline end-of-line note decorations for current-file entries
+- Anchor comment dimming so anchors stay low-noise while editing
+- Inline code lenses for showing and editing notes on the current line
 - `LensMap: Refresh Sidebar`
 - `LensMap: Search Workspace Notes`
+- sidebar entry edit action
 - hover support for `@lensmap-anchor` and `@lensmap-ref`
 - follows the VS Code UI language for English/Chinese prompts and messages
 
@@ -217,6 +224,7 @@ Current capabilities:
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
+- `LensMap > Edit Note at Caret`
 - English/Chinese prompts and notifications
 
 Build the plugin:

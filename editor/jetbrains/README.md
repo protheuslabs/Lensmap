@@ -8,6 +8,7 @@ Minimal JetBrains integration for LensMap with a persistent tool window.
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
+- `LensMap > Edit Note at Caret`
 - English and Chinese prompts/notifications
 
 ## Build
