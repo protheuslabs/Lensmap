@@ -486,7 +486,7 @@ struct AutobotReceipt {
     checkpoint: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum AutobotProfile {
     Conservative,
     Standard,
@@ -7917,7 +7917,7 @@ fn annotation_has_candidate_signal(text: &str) -> bool {
 
 fn autobot_confidence_for_block(text: &str, kind: &str, profile: AutobotProfile) -> f64 {
     let lower = text.to_lowercase();
-    let mut score = 0.36;
+    let mut score: f64 = 0.36;
     if lower.contains("todo") || lower.contains("fixme") {
         score += 0.30;
     }
@@ -7953,7 +7953,7 @@ fn synthetic_ref_id(file: &str, start: usize, end: usize) -> String {
 fn collect_autobot_proposals(
     root: &Path,
     source_files: &[String],
-    doc: &LensMapDoc,
+    _doc: &LensMapDoc,
     existing_keys: &mut HashSet<String>,
     profile: AutobotProfile,
 ) -> (Vec<ImportProposal>, Vec<Value>, usize, usize, usize) {
@@ -8221,14 +8221,14 @@ fn render_scorecard_markdown(
         .unwrap_or(0);
 
     let metric_labels = |name: &str| match name {
-        "note_coverage_rate" => "Note coverage",
-        "stale_note_ratio" => "Stale notes",
-        "orphan_notes_rate" => "Orphan notes",
-        "no_owner_notes_rate" => "No owner notes",
-        "reviewed_rate" => "Reviewed",
-        "anchor_fidelity_rate" => "Anchor fidelity",
-        "policy_pass_rate" => "Policy pass",
-        _ => name,
+        "note_coverage_rate" => "Note coverage".to_string(),
+        "stale_note_ratio" => "Stale notes".to_string(),
+        "orphan_notes_rate" => "Orphan notes".to_string(),
+        "no_owner_notes_rate" => "No owner notes".to_string(),
+        "reviewed_rate" => "Reviewed".to_string(),
+        "anchor_fidelity_rate" => "Anchor fidelity".to_string(),
+        "policy_pass_rate" => "Policy pass".to_string(),
+        _ => name.to_string(),
     };
 
     let mut lines = vec![
@@ -8334,7 +8334,10 @@ fn render_scorecard_markdown(
     ];
     for (section, key) in counter_sections {
         lines.push(format!("### {}", section));
-        let rows_value = stats.get(key).and_then(Value::as_array).unwrap_or_default();
+        let rows_value: &[Value] = match stats.get(key).and_then(Value::as_array) {
+            Some(rows) => rows,
+            None => &[],
+        };
         if rows_value.is_empty() {
             lines.push("- none".to_string());
             lines.push(String::new());
@@ -8366,22 +8369,20 @@ fn render_scorecard_markdown(
 
     lines.push("## Health".to_string());
     if let Some(obj) = health.as_object() {
-        for name in rows.max(1).min(obj.len()) {
-            let key = obj.keys().nth(name).unwrap_or(&"unknown");
-            if let Some(item) = obj.get(key) {
-                let status = item.get("status").and_then(Value::as_str).unwrap_or("unknown");
-                let value = item.get("value").and_then(Value::as_f64).unwrap_or(0.0);
-                let green = item.get("green").and_then(Value::as_f64).unwrap_or(0.0);
-                let yellow = item.get("yellow").and_then(Value::as_f64).unwrap_or(0.0);
-                let higher_is_better = item
-                    .get("higher_is_better")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                lines.push(format!(
-                    "- {}: {} ({:.2}, green>= {:.2}, yellow>= {:.2}, higher_is_better={})",
-                    key, status, value, green, yellow, higher_is_better
-                ));
-            }
+        let row_limit = rows.max(1).min(obj.len());
+        for (key, item) in obj.iter().take(row_limit) {
+            let status = item.get("status").and_then(Value::as_str).unwrap_or("unknown");
+            let value = item.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+            let green = item.get("green").and_then(Value::as_f64).unwrap_or(0.0);
+            let yellow = item.get("yellow").and_then(Value::as_f64).unwrap_or(0.0);
+            let higher_is_better = item
+                .get("higher_is_better")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            lines.push(format!(
+                "- {}: {} ({:.2}, green>= {:.2}, yellow>= {:.2}, higher_is_better={})",
+                key, status, value, green, yellow, higher_is_better
+            ));
         }
     }
 
@@ -9294,7 +9295,7 @@ fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
     let history_path = default_metric_history_path(root);
     let history = read_history_rows(root, &history_path);
 
-    let mut latest = None;
+    let mut latest: Option<(DateTime<Utc>, Value)> = None;
     let mut latest_rates = BTreeMap::new();
     for row in history {
         if row.get("period").and_then(Value::as_str).unwrap_or("run") != period {
@@ -9304,12 +9305,17 @@ fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
             .get("generated_at")
             .and_then(Value::as_str)
             .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .map(|dt| dt.with_timezone(&Utc))
         else {
             continue;
-        }
-        .with_timezone(&Utc);
+        };
 
-        if latest.is_none_or(|(prev, _)| timestamp > *prev) {
+        let should_update = if let Some((prev, _)) = latest.as_ref() {
+            timestamp > *prev
+        } else {
+            true
+        };
+        if should_update {
             let snapshot = row
                 .get("snapshot")
                 .unwrap_or_else(|| row.get("metrics").unwrap_or(&row));
