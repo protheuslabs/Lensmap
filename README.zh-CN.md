@@ -9,7 +9,7 @@ LensMap 是一个与代码绑定的外部文档层。它通过稳定的函数锚
 - 为函数插入确定性的锚点注释：`@lensmap-anchor <HEXID>`
 - 使用 `<HEXID>-<offset>` 或 `<HEXID>-<start>-<end>` 引用外部注释
 - 通过源码锚点、AST 符号路径、指纹和行区间重新定位锚点
-- 支持 JavaScript、TypeScript、Python、Rust、Go、Java 的 AST 解析
+- 支持 JavaScript、TypeScript、Python、Rust、Go、Java、C、C++、C#、Kotlin 的 AST 解析
 - 将源码中的注释提取到 LensMap 文件
 - 将 LensMap 条目重新合并回源码
 - 生成便于阅读的 Markdown 侧边文档
@@ -60,7 +60,7 @@ LENSMAP_LANG=en lensmap validate --lensmap=demo/lensmap.json
 ## 文件中的注释格式
 
 - Python：`# @lensmap-anchor ...` / `# @lensmap-ref ...`
-- JS/TS/Rust/Go/Java：`// @lensmap-anchor ...` / `// @lensmap-ref ...`
+- JS/TS/Rust/Go/Java/C/C++/C#/Kotlin：`// @lensmap-anchor ...` / `// @lensmap-ref ...`
 
 ## VS Code 扩展
 

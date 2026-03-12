@@ -14,7 +14,7 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 - Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
 - Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
 - Resolves anchors using source anchor ID first, then AST-backed symbol path and fingerprint metadata, then stored line/span hints.
-- Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, and Java.
+- Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin.
 - Extracts inline/source comments into lens entries.
 - Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
 - Includes a minimal VS Code integration for show/annotate/hover workflows.
@@ -151,7 +151,7 @@ lensmap validate --lensmap=demo/lensmap.json
 ## Marker format by file type
 
 - Python: `# @lensmap-anchor ...` / `# @lensmap-ref ...`
-- JS/TS/Rust/Go/Java: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
+- JS/TS/Rust/Go/Java/C/C++/C#/Kotlin: `// @lensmap-anchor ...` / `// @lensmap-ref ...`
 
 ## Workflow
 

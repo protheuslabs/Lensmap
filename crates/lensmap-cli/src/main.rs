@@ -23,7 +23,8 @@ const SKIP_PREFIXES: &[&str] = &[
     "local/private-lenses/",
 ];
 const SUPPORTED_EXTS: &[&str] = &[
-    ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".java",
+    ".js", ".ts", ".tsx", ".jsx", ".mjs", ".cjs", ".py", ".rs", ".go", ".java", ".c", ".h", ".cc",
+    ".cpp", ".cxx", ".hh", ".hpp", ".hxx", ".cs", ".kt", ".kts",
 ];
 const PRESERVE_COMMENT_PREFIXES: &[&str] = &[
     "!/usr/bin/env",
@@ -1097,6 +1098,63 @@ fn java_ctor_re() -> &'static Regex {
     })
 }
 
+fn c_family_fn_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:template\s*<[^>]+>\s*)?(?:[\w:&*<>\[\]~]+\s+)+([A-Za-z_~][\w:~]*)\s*\([^;]*\)\s*(?:const\s*)?(?:noexcept\s*)?\{",
+        )
+        .unwrap()
+    })
+}
+
+fn csharp_fn_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|static\s+|virtual\s+|override\s+|sealed\s+|async\s+|partial\s+|unsafe\s+|new\s+)*(?:<[^>]+>\s+)?[A-Za-z_][\w<>\[\], ?]*\s+([A-Za-z_][\w]*)\s*\([^;]*\)\s*(?:=>|\{)",
+        )
+        .unwrap()
+    })
+}
+
+fn csharp_ctor_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)([A-Za-z_][\w]*)\s*\([^;]*\)\s*(?:=>|\{)",
+        )
+        .unwrap()
+    })
+}
+
+fn kotlin_fn_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(
+            r"^\s*(?:(?:public|private|protected|internal|open|override|suspend|inline|tailrec|operator|infix|external|abstract|final|actual|expect|lateinit|data|enum|sealed|value)\s+)*fun\s+([A-Za-z_][\w]*)\s*\(",
+        )
+        .unwrap()
+    })
+}
+
+fn kotlin_ctor_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| {
+        Regex::new(r"^\s*(?:(?:public|private|protected|internal)\s+)?constructor\s*\(").unwrap()
+    })
+}
+
+fn namespace_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*namespace\s+([A-Za-z_][A-Za-z0-9_.]*)\s*[;{]").unwrap())
+}
+
+fn package_prefix_re() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"^\s*package\s+([A-Za-z_][A-Za-z0-9_.]*)\b").unwrap())
+}
+
 fn line_indent(lines: &[String], line_index: usize) -> String {
     lines
         .get(line_index)
@@ -1147,6 +1205,70 @@ fn go_receiver_type_name(raw: &str) -> Option<String> {
     }
 }
 
+fn strip_generic_segments(raw: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for ch in raw.chars() {
+        match ch {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn c_family_symbol_from_declarator(raw: &str, scope: &[String]) -> Option<(String, String)> {
+    let prefix = raw.split('(').next()?.trim();
+    if prefix.is_empty() {
+        return None;
+    }
+    let token = prefix
+        .split_whitespace()
+        .last()
+        .unwrap_or("")
+        .trim_matches(|c: char| c == '*' || c == '&' || c == '(' || c == ')');
+    if token.is_empty() {
+        return None;
+    }
+    let cleaned = strip_generic_segments(token)
+        .trim_matches(|c: char| c == '*' || c == '&' || c == ':')
+        .to_string();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if cleaned.contains("::") {
+        let parts = cleaned
+            .split("::")
+            .filter(|part| !part.trim().is_empty())
+            .map(|part| part.trim().to_string())
+            .collect::<Vec<_>>();
+        let symbol = parts.last()?.clone();
+        return Some((symbol, parts.join(".")));
+    }
+    let symbol = cleaned;
+    Some((symbol.clone(), path_with_symbol(scope, &symbol)))
+}
+
+fn file_scope_prefix(lines: &[String], ext: &str) -> Option<String> {
+    if ext == ".cs" {
+        for line in lines {
+            if let Some(captures) = namespace_prefix_re().captures(line) {
+                return captures.get(1).map(|m| m.as_str().to_string());
+            }
+        }
+    }
+    if ext == ".kt" || ext == ".kts" {
+        for line in lines {
+            if let Some(captures) = package_prefix_re().captures(line) {
+                return captures.get(1).map(|m| m.as_str().to_string());
+            }
+        }
+    }
+    None
+}
+
 fn ast_scope_name(node: Node<'_>, source: &[u8], ext: &str) -> Option<String> {
     match ext {
         ".js" | ".jsx" | ".ts" | ".tsx" | ".mjs" | ".cjs" => match node.kind() {
@@ -1181,6 +1303,31 @@ fn ast_scope_name(node: Node<'_>, source: &[u8], ext: &str) -> Option<String> {
             | "enum_declaration"
             | "record_declaration"
             | "annotation_type_declaration" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".cc" | ".cpp" | ".cxx" | ".hh" | ".hpp" | ".hxx" => match node.kind() {
+            "namespace_definition" | "class_specifier" | "struct_specifier" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source))
+                .map(|name| strip_generic_segments(&name)),
+            _ => None,
+        },
+        ".cs" => match node.kind() {
+            "namespace_declaration"
+            | "file_scoped_namespace_declaration"
+            | "class_declaration"
+            | "struct_declaration"
+            | "interface_declaration"
+            | "record_declaration"
+            | "enum_declaration" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".kt" | ".kts" => match node.kind() {
+            "class_declaration" | "object_declaration" => node
                 .child_by_field_name("name")
                 .and_then(|child| node_text(child, source)),
             _ => None,
@@ -1243,6 +1390,28 @@ fn ast_function_hit(
                 .and_then(|child| node_text(child, source)),
             _ => None,
         },
+        ".c" | ".h" | ".cc" | ".cpp" | ".cxx" | ".hh" | ".hpp" | ".hxx" => {
+            if node.kind() != "function_definition" {
+                None
+            } else {
+                let declarator = node.child_by_field_name("declarator")?;
+                let raw = node_text(declarator, source)?;
+                c_family_symbol_from_declarator(&raw, scope).map(|(symbol, _)| symbol)
+            }
+        }
+        ".cs" => match node.kind() {
+            "method_declaration" | "constructor_declaration" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            _ => None,
+        },
+        ".kt" | ".kts" => match node.kind() {
+            "function_declaration" => node
+                .child_by_field_name("name")
+                .and_then(|child| node_text(child, source)),
+            "secondary_constructor" => scope.last().cloned(),
+            _ => None,
+        },
         _ => None,
     }?;
 
@@ -1257,6 +1426,23 @@ fn ast_function_hit(
         {
             if let Some(receiver_name) = go_receiver_type_name(&receiver) {
                 format!("{}.{}", receiver_name, symbol)
+            } else {
+                path_with_symbol(scope, &symbol)
+            }
+        } else {
+            path_with_symbol(scope, &symbol)
+        }
+    } else if [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"].contains(&ext)
+        && node.kind() == "function_definition"
+    {
+        if let Some(declarator) = node
+            .child_by_field_name("declarator")
+            .and_then(|child| node_text(child, source))
+        {
+            if let Some((_resolved_symbol, resolved_path)) =
+                c_family_symbol_from_declarator(&declarator, scope)
+            {
+                resolved_path
             } else {
                 path_with_symbol(scope, &symbol)
             }
@@ -1286,6 +1472,10 @@ fn parser_for_extension(ext: &str) -> Option<Parser> {
         ".rs" => tree_sitter_rust::LANGUAGE.into(),
         ".go" => tree_sitter_go::LANGUAGE.into(),
         ".java" => tree_sitter_java::LANGUAGE.into(),
+        ".c" | ".h" => tree_sitter_c::LANGUAGE.into(),
+        ".cc" | ".cpp" | ".cxx" | ".hh" | ".hpp" | ".hxx" => tree_sitter_cpp::LANGUAGE.into(),
+        ".cs" => tree_sitter_c_sharp::LANGUAGE.into(),
+        ".kt" | ".kts" => tree_sitter_kotlin_ng::LANGUAGE.into(),
         _ => return None,
     };
     parser.set_language(&language).ok()?;
@@ -1342,6 +1532,13 @@ fn detect_functions_ast(lines: &[String], abs_file: &Path) -> Vec<FunctionHit> {
         &mut scope,
         &mut hits,
     );
+    if let Some(prefix) = file_scope_prefix(lines, &ext) {
+        for hit in &mut hits {
+            if hit.symbol_path != prefix && !hit.symbol_path.starts_with(&format!("{}.", prefix)) {
+                hit.symbol_path = format!("{}.{}", prefix, hit.symbol_path);
+            }
+        }
+    }
     hits.sort_by(|a, b| {
         if a.line_index != b.line_index {
             return a.line_index.cmp(&b.line_index);
@@ -1411,6 +1608,33 @@ fn detect_functions_regex(lines: &[String], abs_file: &Path) -> Vec<FunctionHit>
                 if let Some(c) = java_ctor_re().captures(line) {
                     symbol = c.get(1).map(|m| m.as_str().to_string());
                 }
+            }
+        } else if [".c", ".h", ".cc", ".cpp", ".cxx", ".hh", ".hpp", ".hxx"].contains(&ext.as_str())
+        {
+            if let Some(c) = c_family_fn_re().captures(line) {
+                symbol = c.get(1).map(|m| {
+                    m.as_str()
+                        .split("::")
+                        .last()
+                        .unwrap_or(m.as_str())
+                        .to_string()
+                });
+            }
+        } else if ext == ".cs" {
+            if let Some(c) = csharp_fn_re().captures(line) {
+                symbol = c.get(1).map(|m| m.as_str().to_string());
+            }
+            if symbol.is_none() {
+                if let Some(c) = csharp_ctor_re().captures(line) {
+                    symbol = c.get(1).map(|m| m.as_str().to_string());
+                }
+            }
+        } else if ext == ".kt" || ext == ".kts" {
+            if let Some(c) = kotlin_fn_re().captures(line) {
+                symbol = c.get(1).map(|m| m.as_str().to_string());
+            }
+            if symbol.is_none() && kotlin_ctor_re().is_match(line) {
+                symbol = Some("constructor".to_string());
             }
         }
 
@@ -4929,8 +5153,8 @@ fn usage() {
     println!(
         "{}",
         tr(
-            "Supported AST languages: JavaScript, TypeScript, Python, Rust, Go, Java.",
-            "当前支持的 AST 语言：JavaScript、TypeScript、Python、Rust、Go、Java。",
+            "Supported AST languages: JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, Kotlin.",
+            "当前支持的 AST 语言：JavaScript、TypeScript、Python、Rust、Go、Java、C、C++、C#、Kotlin。",
         )
     );
 }
@@ -5051,6 +5275,88 @@ func Top() {
             .map(|hit| hit.symbol_path.clone())
             .collect::<Vec<_>>();
         assert!(paths.contains(&"Worker.Worker".to_string()));
+        assert!(paths.contains(&"Worker.run".to_string()));
+        assert!(paths.contains(&"Worker.Inner.nested".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn detect_functions_ast_supports_c_functions() {
+        let source = r#"static int add(int left, int right) {
+    return left + right;
+}
+"#;
+        let (path, lines) = write_temp_source(".c", "math", source);
+        let hits = detect_functions_ast(&lines, &path);
+        let paths = hits
+            .iter()
+            .map(|hit| hit.symbol_path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"add".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn detect_functions_ast_supports_cpp_scoped_methods() {
+        let source = r#"namespace api {
+class Worker {
+public:
+    void run() {
+    }
+};
+}
+"#;
+        let (path, lines) = write_temp_source(".cpp", "worker", source);
+        let hits = detect_functions_ast(&lines, &path);
+        let paths = hits
+            .iter()
+            .map(|hit| hit.symbol_path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"api.Worker.run".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn detect_functions_ast_supports_csharp_namespaces() {
+        let source = r#"namespace Demo.Tools;
+
+class Worker {
+    Worker() {
+    }
+
+    public void Run() {
+    }
+}
+"#;
+        let (path, lines) = write_temp_source(".cs", "Worker", source);
+        let hits = detect_functions_ast(&lines, &path);
+        let paths = hits
+            .iter()
+            .map(|hit| hit.symbol_path.clone())
+            .collect::<Vec<_>>();
+        assert!(paths.contains(&"Demo.Tools.Worker.Worker".to_string()));
+        assert!(paths.contains(&"Demo.Tools.Worker.Run".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn detect_functions_ast_supports_kotlin_members() {
+        let source = r#"class Worker {
+    fun run() {
+    }
+
+    object Inner {
+        fun nested() {
+        }
+    }
+}
+"#;
+        let (path, lines) = write_temp_source(".kt", "Worker", source);
+        let hits = detect_functions_ast(&lines, &path);
+        let paths = hits
+            .iter()
+            .map(|hit| hit.symbol_path.clone())
+            .collect::<Vec<_>>();
         assert!(paths.contains(&"Worker.run".to_string()));
         assert!(paths.contains(&"Worker.Inner.nested".to_string()));
         let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));

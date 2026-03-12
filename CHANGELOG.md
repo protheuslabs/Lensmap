@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.6
+- Added AST-backed symbol/span detection for C, C++, C#, and Kotlin.
+- Extended the VS Code integration to C/C++/C#/Kotlin files and bumped the packaged extension to `0.2.1`.
+- Preserved English/Chinese localization across the CLI, Markdown renderers, and VS Code workflows while expanding language coverage.
+
 ## 0.3.5
 - Added AST-backed symbol/span detection for Go and Java, keeping regex fallback for degraded parses.
 - Added English/Chinese localization support to the CLI (`--lang=en|zh-CN` or `LENSMAP_LANG`), including localized help, prompts, and messages.

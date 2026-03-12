@@ -8,6 +8,7 @@ Minimal VS Code integration for LensMap.
 - Add a LensMap note at the cursor
 - Hover on `@lensmap-anchor` and `@lensmap-ref`
 - Follows the VS Code UI language and supports English and Chinese
+- Supports JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin files
 
 ## Packaging
 
@@ -33,3 +34,4 @@ The packaged extension is written to `artifacts/lensmap-vscode-<version>.vsix`.
 - 在光标位置添加 LensMap 注释
 - 支持 `@lensmap-anchor` 和 `@lensmap-ref` 的悬停查看
 - 自动跟随 VS Code 界面语言，支持英文和中文
+- 支持 JavaScript、TypeScript、Python、Rust、Go、Java、C、C++、C#、Kotlin 文件

@@ -2,7 +2,7 @@
   "name": "lensmap-vscode",
   "displayName": "%lensmap.displayName%",
   "description": "%lensmap.description%",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "protheuslabs",
   "license": "MIT",
   "homepage": "https://github.com/protheuslabs/Lensmap",
@@ -12,7 +12,7 @@
     "directory": "editor/vscode"
   },
   "engines": {
-    "vscode": "^1.90.0"
+    "vscode": "^1.86.0"
   },
   "categories": [
     "Other"
@@ -33,7 +33,11 @@
     "onLanguage:python",
     "onLanguage:rust",
     "onLanguage:go",
-    "onLanguage:java"
+    "onLanguage:java",
+    "onLanguage:c",
+    "onLanguage:cpp",
+    "onLanguage:csharp",
+    "onLanguage:kotlin"
   ],
   "main": "./extension.js",
   "files": [

@@ -12,6 +12,10 @@ const SUPPORTED_LANGUAGES = [
   "rust",
   "go",
   "java",
+  "c",
+  "cpp",
+  "csharp",
+  "kotlin",
 ];
 
 function isChineseLocale() {
