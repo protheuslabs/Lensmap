@@ -95,6 +95,8 @@ struct AnchorRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    signature_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<String>,
 }
 
@@ -133,6 +135,43 @@ struct LensMapDoc {
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 #[serde(default)]
+struct LensMapIndexDoc {
+    #[serde(rename = "type")]
+    doc_type: String,
+    version: String,
+    root: String,
+    generated_at: String,
+    lensmaps: Vec<String>,
+    entries: Vec<SearchEntryRecord>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct SearchEntryRecord {
+    lensmap: String,
+    file: String,
+    #[serde(rename = "ref")]
+    ref_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    symbol_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    start_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    end_line: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolve_strategy: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 struct PackageItem {
     id: String,
     original_path: String,
@@ -167,6 +206,7 @@ struct FunctionHit {
     symbol_path: String,
     indent: String,
     fingerprint: String,
+    signature_text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -361,10 +401,7 @@ fn localized_error_message(error: &str) -> Option<String> {
             "Bundle directory is outside the repository root. Operation blocked.",
             "打包目录位于仓库根目录之外。操作已阻止。",
         ),
-        "no_lensmap_files_found" => tr(
-            "No LensMap files were found to package.",
-            "没有找到可打包的 LensMap 文件。",
-        ),
+        "no_lensmap_files_found" => tr("No LensMap files were found.", "没有找到 LensMap 文件。"),
         "invalid_on_missing" => tr(
             "Invalid --on-missing mode. Use prompt, skip, or error.",
             "无效的 --on-missing 模式。请使用 prompt、skip 或 error。",
@@ -386,7 +423,12 @@ fn localized_error_message(error: &str) -> Option<String> {
             "Target already exists. Re-run with --overwrite to replace it.",
             "目标已存在。如需覆盖，请重新运行并添加 --overwrite。",
         ),
+        "security_output_outside_root" => tr(
+            "Output path is outside the repository root. Operation blocked.",
+            "输出路径位于仓库根目录之外。操作已阻止。",
+        ),
         "from_required" => tr("Import requires --from.", "import 命令需要提供 --from。"),
+        "query_required" => tr("Search requires --query.", "search 命令需要提供 --query。"),
         _ if error.starts_with("copy_failed:") => tr(
             "A file copy failed during packaging or unpackaging.",
             "打包或解包过程中出现文件复制失败。",
@@ -430,6 +472,8 @@ fn localized_action_message(action: &str) -> Option<String> {
         "polish" => tr("Polish artifacts refreshed.", "整理产物已刷新。"),
         "import" => tr("Import receipt created.", "导入回执已创建。"),
         "sync" => tr("LensMap sync completed.", "LensMap 同步已完成。"),
+        "index" => tr("LensMap index refreshed.", "LensMap 索引已刷新。"),
+        "search" => tr("LensMap search completed.", "LensMap 搜索已完成。"),
         "expose" => tr(
             "Lens exposed to the private store.",
             "镜头已暴露到私有存储。",
@@ -896,6 +940,53 @@ fn save_doc(path: &Path, mut doc: LensMapDoc) {
     );
 }
 
+fn default_index_path(root: &Path) -> PathBuf {
+    root.join(".lensmap-index.json")
+}
+
+fn make_index_doc(
+    root: &Path,
+    lensmaps: Vec<String>,
+    mut entries: Vec<SearchEntryRecord>,
+) -> LensMapIndexDoc {
+    entries.sort_by(|a, b| {
+        if a.file != b.file {
+            return a.file.cmp(&b.file);
+        }
+        a.start_line
+            .unwrap_or(0)
+            .cmp(&b.start_line.unwrap_or(0))
+            .then_with(|| a.ref_id.cmp(&b.ref_id))
+    });
+    LensMapIndexDoc {
+        doc_type: "lensmap-index".to_string(),
+        version: "1.0.0".to_string(),
+        root: normalize_relative(root, root),
+        generated_at: now_iso(),
+        lensmaps,
+        entries,
+    }
+}
+
+fn load_index_doc(path: &Path) -> LensMapIndexDoc {
+    if !path.exists() {
+        return LensMapIndexDoc::default();
+    }
+    let raw = fs::read_to_string(path).unwrap_or_else(|_| "{}".to_string());
+    serde_json::from_str::<LensMapIndexDoc>(&raw).unwrap_or_default()
+}
+
+fn save_index_doc(path: &Path, doc: &LensMapIndexDoc) {
+    ensure_dir(path);
+    let _ = fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(doc).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+}
+
 fn append_history(root: &Path, row: &Value) {
     let history_path = root.join("local/state/ops/lensmap/history.jsonl");
     ensure_dir(&history_path);
@@ -1164,6 +1255,14 @@ fn line_indent(lines: &[String], line_index: usize) -> String {
 
 fn normalize_fingerprint_text(raw: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn signature_text_from_source(raw: &str) -> String {
+    raw.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(normalize_fingerprint_text)
+        .unwrap_or_else(|| normalize_fingerprint_text(raw))
 }
 
 fn node_text(node: Node<'_>, source: &[u8]) -> Option<String> {
@@ -1459,6 +1558,7 @@ fn ast_function_hit(
         symbol_path,
         indent: line_indent(lines, start_line),
         fingerprint: hash_text(&normalized),
+        signature_text: signature_text_from_source(&text),
     })
 }
 
@@ -1649,6 +1749,7 @@ fn detect_functions_regex(lines: &[String], abs_file: &Path) -> Vec<FunctionHit>
                 symbol_path: symbol,
                 indent,
                 fingerprint,
+                signature_text: signature_text_from_source(line),
             });
         }
     }
@@ -1856,6 +1957,7 @@ fn materialize_anchors_for_file(root: &Path, abs: &Path, lines: &[String]) -> Ve
             span_start: fn_hit.map(|f| f.line_index + 1),
             span_end: fn_hit.map(|f| f.span_end_index + 1),
             fingerprint: fn_hit.map(|f| f.fingerprint.clone()),
+            signature_text: fn_hit.map(|f| f.signature_text.clone()),
             updated_at: Some(now_iso()),
         });
     }
@@ -1923,6 +2025,15 @@ fn ensure_anchor_for_symbol(
                     .into_iter()
                     .filter(|f| &f.fingerprint == fp)
                     .collect::<Vec<_>>();
+            }
+            if candidates.len() > 1 {
+                if let Some(signature_text) = anchor.signature_text.as_deref() {
+                    let expected = normalize_fingerprint_text(signature_text);
+                    candidates = candidates
+                        .into_iter()
+                        .filter(|f| normalize_fingerprint_text(&f.signature_text) == expected)
+                        .collect::<Vec<_>>();
+                }
             }
         }
     }
@@ -2044,6 +2155,149 @@ fn tracked_anchor_matches_function(anchor: &AnchorRecord, fn_hit: &FunctionHit) 
     anchor.line_symbol == Some(fn_hit.line_index + 1)
 }
 
+fn symbol_path_suffix_depth(left: &str, right: &str) -> usize {
+    let left_parts = left.split('.').collect::<Vec<_>>();
+    let right_parts = right.split('.').collect::<Vec<_>>();
+    let mut shared = 0usize;
+    while shared < left_parts.len() && shared < right_parts.len() {
+        let left_idx = left_parts.len() - 1 - shared;
+        let right_idx = right_parts.len() - 1 - shared;
+        if left_parts[left_idx] != right_parts[right_idx] {
+            break;
+        }
+        shared += 1;
+    }
+    shared
+}
+
+fn token_set(raw: &str) -> HashSet<String> {
+    raw.split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_')
+        .map(|part| part.trim().to_lowercase())
+        .filter(|part| part.len() >= 2)
+        .collect()
+}
+
+fn token_overlap_score(left: &str, right: &str) -> i32 {
+    let left_tokens = token_set(left);
+    let right_tokens = token_set(right);
+    if left_tokens.is_empty() || right_tokens.is_empty() {
+        return 0;
+    }
+    let shared = left_tokens.intersection(&right_tokens).count() as f64;
+    let union = left_tokens.union(&right_tokens).count() as f64;
+    ((shared / union) * 100.0).round() as i32
+}
+
+fn span_length(start_line: usize, end_line: usize) -> usize {
+    end_line.saturating_sub(start_line) + 1
+}
+
+fn line_proximity_score(expected_line: Option<usize>, actual_line: usize) -> i32 {
+    let expected_line = if let Some(expected_line) = expected_line {
+        expected_line
+    } else {
+        return 0;
+    };
+    let distance = expected_line.abs_diff(actual_line) as i32;
+    (70 - distance.min(70)).max(0)
+}
+
+fn span_similarity_score(anchor: &AnchorRecord, fn_hit: &FunctionHit) -> i32 {
+    let (span_start, span_end) =
+        if let (Some(span_start), Some(span_end)) = (anchor.span_start, anchor.span_end) {
+            (span_start, span_end)
+        } else {
+            return 0;
+        };
+    let anchor_len = span_length(span_start, span_end);
+    let fn_len = span_length(fn_hit.line_index + 1, fn_hit.span_end_index + 1);
+    match anchor_len.abs_diff(fn_len) {
+        0 => 40,
+        1..=2 => 28,
+        3..=5 => 16,
+        _ => 0,
+    }
+}
+
+fn fuzzy_candidate_score(anchor: &AnchorRecord, fn_hit: &FunctionHit) -> i32 {
+    let mut score = 0i32;
+
+    if let Some(symbol_path) = &anchor.symbol_path {
+        if symbol_path == &fn_hit.symbol_path {
+            score += 140;
+        } else {
+            score += match symbol_path_suffix_depth(symbol_path, &fn_hit.symbol_path) {
+                0 => 0,
+                1 => 28,
+                2 => 54,
+                _ => 80,
+            };
+        }
+    }
+
+    if let Some(symbol) = &anchor.symbol {
+        if symbol == &fn_hit.symbol {
+            score += 60;
+        }
+    }
+
+    if let Some(fingerprint) = &anchor.fingerprint {
+        if fingerprint == &fn_hit.fingerprint {
+            score += 160;
+        }
+    }
+
+    if let Some(signature_text) = anchor.signature_text.as_deref() {
+        let normalized_left = normalize_fingerprint_text(signature_text);
+        let normalized_right = normalize_fingerprint_text(&fn_hit.signature_text);
+        if normalized_left == normalized_right {
+            score += 120;
+        } else {
+            score += token_overlap_score(&normalized_left, &normalized_right);
+        }
+    }
+
+    score += span_similarity_score(anchor, fn_hit);
+    score += line_proximity_score(
+        anchor.line_symbol.or(anchor.span_start),
+        fn_hit.line_index + 1,
+    );
+    score += line_proximity_score(anchor.line_anchor, fn_hit.line_index + 1) / 2;
+    score
+}
+
+fn fuzzy_resolve_anchor(anchor: &AnchorRecord, fns: &[FunctionHit]) -> Option<FunctionHit> {
+    let mut scored = fns
+        .iter()
+        .cloned()
+        .map(|fn_hit| {
+            let score = fuzzy_candidate_score(anchor, &fn_hit);
+            let line_bias = anchor
+                .line_symbol
+                .or(anchor.span_start)
+                .or(anchor.line_anchor)
+                .map(|line| line.abs_diff(fn_hit.line_index + 1))
+                .unwrap_or(usize::MAX);
+            (fn_hit, score, line_bias)
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| left.2.cmp(&right.2))
+            .then_with(|| left.0.symbol_path.cmp(&right.0.symbol_path))
+    });
+
+    let (best_hit, best_score, _) = scored.first()?.clone();
+    let next_score = scored.get(1).map(|item| item.1).unwrap_or(0);
+    if best_score >= 140 && best_score - next_score >= 20 {
+        Some(best_hit)
+    } else {
+        None
+    }
+}
+
 fn comment_block_in_range(blocks: &[CommentBlock], start: usize, end_exclusive: usize) -> bool {
     blocks.iter().any(|block| {
         (block.start >= start && block.start < end_exclusive)
@@ -2135,18 +2389,6 @@ fn resolve_anchor_in_lines(
     }
 
     if candidate.is_none() {
-        if let Some(line_symbol) = anchor.line_symbol {
-            candidate = fns
-                .iter()
-                .find(|f| f.line_index + 1 == line_symbol)
-                .cloned();
-            if candidate.is_some() {
-                strategy = "line_symbol".to_string();
-            }
-        }
-    }
-
-    if candidate.is_none() {
         if let (Some(span_start), Some(span_end)) = (anchor.span_start, anchor.span_end) {
             candidate = fns
                 .iter()
@@ -2154,6 +2396,25 @@ fn resolve_anchor_in_lines(
                 .cloned();
             if candidate.is_some() {
                 strategy = "span".to_string();
+            }
+        }
+    }
+
+    if candidate.is_none() {
+        candidate = fuzzy_resolve_anchor(anchor, fns);
+        if candidate.is_some() {
+            strategy = "fuzzy_refactor".to_string();
+        }
+    }
+
+    if candidate.is_none() {
+        if let Some(line_symbol) = anchor.line_symbol {
+            candidate = fns
+                .iter()
+                .find(|f| f.line_index + 1 == line_symbol)
+                .cloned();
+            if candidate.is_some() {
+                strategy = "line_symbol".to_string();
             }
         }
     }
@@ -4294,6 +4555,10 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
                     .function_hit
                     .as_ref()
                     .map(|f| f.fingerprint.clone());
+                doc.anchors[idx].signature_text = resolution
+                    .function_hit
+                    .as_ref()
+                    .map(|f| f.signature_text.clone());
                 doc.anchors[idx].updated_at = Some(now_iso());
                 resolved += 1;
                 continue;
@@ -4367,6 +4632,10 @@ fn reanchor_doc(root: &Path, doc: &mut LensMapDoc, dry_run: bool) -> (usize, usi
                 .function_hit
                 .as_ref()
                 .map(|f| f.fingerprint.clone());
+            doc.anchors[idx].signature_text = refreshed
+                .function_hit
+                .as_ref()
+                .map(|f| f.signature_text.clone());
             doc.anchors[idx].updated_at = Some(now_iso());
             resolved += 1;
         }
@@ -4997,6 +5266,156 @@ fn cmd_sync(root: &Path, args: &ParsedArgs) {
     emit(out, if ok { 0 } else { 1 });
 }
 
+fn cmd_index(root: &Path, args: &ParsedArgs) {
+    let lensmaps = resolve_search_lensmap_paths(root, args);
+    if lensmaps.is_empty() {
+        emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+    }
+
+    let index_path = if let Some(out) = args.get("out").or_else(|| args.get("index")) {
+        resolve_from_root(root, out)
+    } else {
+        default_index_path(root)
+    };
+    if !is_within_root(root, &index_path) {
+        emit(
+            json!({"ok": false, "error": "security_output_outside_root"}),
+            1,
+        );
+    }
+
+    let entries = collect_repo_search_entries(root, &lensmaps);
+    let doc = make_index_doc(root, lensmaps.clone(), entries.clone());
+    save_index_doc(&index_path, &doc);
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "index",
+        "index": normalize_relative(root, &index_path),
+        "lensmaps": lensmaps,
+        "lensmap_count": doc.lensmaps.len(),
+        "entry_count": doc.entries.len(),
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
+fn cmd_search(root: &Path, args: &ParsedArgs) {
+    let query = args.get("query").unwrap_or("").trim().to_string();
+    if query.is_empty() {
+        emit(json!({"ok": false, "error": "query_required"}), 1);
+    }
+
+    let limit = args
+        .get("limit")
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(25)
+        .clamp(1, 200);
+    let file_filter = args
+        .get("file")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let symbol_filter = args
+        .get("symbol")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let kind_filter = args
+        .get("kind")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    let index_path = args.get("index").map(|path| resolve_from_root(root, path));
+    let (entries, source_kind, source_path) =
+        if let Some(index_path) = index_path.filter(|path| path.exists()) {
+            let index = load_index_doc(&index_path);
+            (
+                index.entries,
+                "index".to_string(),
+                Some(normalize_relative(root, &index_path)),
+            )
+        } else {
+            let lensmaps = resolve_search_lensmap_paths(root, args);
+            if lensmaps.is_empty() {
+                emit(json!({"ok": false, "error": "no_lensmap_files_found"}), 1);
+            }
+            (
+                collect_repo_search_entries(root, &lensmaps),
+                "live".to_string(),
+                None,
+            )
+        };
+
+    let mut scored = entries
+        .into_iter()
+        .filter(|entry| {
+            search_entry_matches_filters(entry, file_filter, symbol_filter, kind_filter)
+        })
+        .filter_map(|entry| {
+            let score = search_entry_score(&entry, &query);
+            if score > 0 {
+                Some((score, entry))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.file.cmp(&right.1.file))
+            .then_with(|| {
+                left.1
+                    .start_line
+                    .unwrap_or(0)
+                    .cmp(&right.1.start_line.unwrap_or(0))
+            })
+            .then_with(|| left.1.ref_id.cmp(&right.1.ref_id))
+    });
+    let total_matches = scored.len();
+    scored.truncate(limit);
+
+    let results = scored
+        .into_iter()
+        .map(|(score, entry)| {
+            json!({
+                "score": score,
+                "lensmap": entry.lensmap,
+                "file": entry.file,
+                "ref": entry.ref_id,
+                "anchor_id": entry.anchor_id,
+                "kind": entry.kind,
+                "text": entry.text,
+                "symbol": entry.symbol,
+                "symbol_path": entry.symbol_path,
+                "start_line": entry.start_line,
+                "end_line": entry.end_line,
+                "resolve_strategy": entry.resolve_strategy,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "search",
+        "query": query,
+        "file": file_filter,
+        "symbol": symbol_filter,
+        "kind": kind_filter,
+        "source_kind": source_kind,
+        "source_path": source_path,
+        "total_matches": total_matches,
+        "returned": results.len(),
+        "results": results,
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(out, 0);
+}
+
 fn cmd_expose(root: &Path, args: &ParsedArgs) {
     let lens_name = args
         .get("name")
@@ -5100,6 +5519,211 @@ fn cmd_status(root: &Path, args: &ParsedArgs) {
     );
 }
 
+fn resolve_search_lensmap_paths(root: &Path, args: &ParsedArgs) -> Vec<String> {
+    if let Some(raw) = args.get("lensmaps") {
+        let mut paths = BTreeMap::new();
+        for lensmap in split_csv(Some(raw)) {
+            let abs = resolve_from_root(root, &lensmap);
+            if is_within_root(root, &abs) && abs.exists() && is_lensmap_filename(&abs) {
+                paths.insert(normalize_relative(root, &abs), true);
+            }
+        }
+        return paths.keys().cloned().collect();
+    }
+    discover_lensmap_files(root, args.get("bundle-dir").unwrap_or(".lenspack"))
+}
+
+fn collect_doc_search_entries(
+    root: &Path,
+    lensmap_path: &Path,
+    doc: &LensMapDoc,
+) -> Vec<SearchEntryRecord> {
+    let lensmap_rel = normalize_relative(root, lensmap_path);
+    let mut files = BTreeMap::new();
+    for entry in &doc.entries {
+        if !entry.file.trim().is_empty() {
+            files.insert(entry.file.clone(), true);
+        }
+    }
+    for anchor in &doc.anchors {
+        if !anchor.file.trim().is_empty() {
+            files.insert(anchor.file.clone(), true);
+        }
+    }
+
+    let anchor_map = doc
+        .anchors
+        .iter()
+        .map(|anchor| (anchor.id.to_uppercase(), anchor.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut out = vec![];
+
+    for (rel, _) in files {
+        let abs = resolve_from_root(root, &rel);
+        let (file_lines, functions, style, resolutions) =
+            if is_within_root(root, &abs) && abs.exists() {
+                let file_lines = split_lines(&fs::read_to_string(&abs).unwrap_or_default());
+                let functions = detect_functions(&file_lines, &abs);
+                let style = comment_style_for(&abs);
+                let mut resolutions = HashMap::new();
+                for anchor in doc.anchors.iter().filter(|anchor| anchor.file == rel) {
+                    resolutions.insert(
+                        anchor.id.to_uppercase(),
+                        resolve_anchor_in_lines(anchor, &file_lines, &functions, &style),
+                    );
+                }
+                (Some(file_lines), Some(functions), Some(style), resolutions)
+            } else {
+                (None, None, None, HashMap::new())
+            };
+
+        for entry in doc.entries.iter().filter(|entry| entry.file == rel) {
+            let parsed = parse_ref(&entry.ref_id);
+            let anchor_id = entry
+                .anchor_id
+                .clone()
+                .or_else(|| parsed.as_ref().map(|parts| parts.anchor_id.clone()));
+            let anchor = anchor_id
+                .as_ref()
+                .and_then(|id| anchor_map.get(&id.to_uppercase()).cloned());
+            let resolution = anchor.as_ref().and_then(|anchor| {
+                if let Some(found) = resolutions.get(&anchor.id.to_uppercase()) {
+                    return Some(found.clone());
+                }
+                if let (Some(lines), Some(functions), Some(style)) =
+                    (file_lines.as_ref(), functions.as_ref(), style.as_ref())
+                {
+                    return Some(resolve_anchor_in_lines(anchor, lines, functions, style));
+                }
+                None
+            });
+            let start_line = parsed.as_ref().and_then(|parts| {
+                resolution
+                    .as_ref()
+                    .and_then(|found| found.anchor_line_index.map(|idx| idx + parts.start + 1))
+            });
+            let end_line = parsed.as_ref().and_then(|parts| {
+                resolution
+                    .as_ref()
+                    .and_then(|found| found.anchor_line_index.map(|idx| idx + parts.end + 1))
+            });
+
+            out.push(SearchEntryRecord {
+                lensmap: lensmap_rel.clone(),
+                file: rel.clone(),
+                ref_id: entry.ref_id.to_uppercase(),
+                anchor_id,
+                kind: entry.kind.clone(),
+                text: entry.text.clone(),
+                symbol: anchor.as_ref().and_then(|item| item.symbol.clone()),
+                symbol_path: anchor.as_ref().and_then(|item| item.symbol_path.clone()),
+                start_line,
+                end_line,
+                resolve_strategy: resolution.as_ref().map(|item| item.strategy.clone()),
+            });
+        }
+    }
+
+    out
+}
+
+fn collect_repo_search_entries(root: &Path, lensmaps: &[String]) -> Vec<SearchEntryRecord> {
+    let mut out = vec![];
+    for lensmap in lensmaps {
+        let abs = resolve_from_root(root, lensmap);
+        if !is_within_root(root, &abs) || !abs.exists() {
+            continue;
+        }
+        let doc = load_doc(&abs, "group");
+        out.extend(collect_doc_search_entries(root, &abs, &doc));
+    }
+    out
+}
+
+fn search_entry_matches_filters(
+    entry: &SearchEntryRecord,
+    file_filter: Option<&str>,
+    symbol_filter: Option<&str>,
+    kind_filter: Option<&str>,
+) -> bool {
+    if let Some(file) = file_filter {
+        if entry.file != file {
+            return false;
+        }
+    }
+    if let Some(symbol) = symbol_filter {
+        if entry.symbol.as_deref() != Some(symbol) && entry.symbol_path.as_deref() != Some(symbol) {
+            return false;
+        }
+    }
+    if let Some(kind) = kind_filter {
+        if entry.kind.as_deref() != Some(kind) {
+            return false;
+        }
+    }
+    true
+}
+
+fn search_entry_score(entry: &SearchEntryRecord, query: &str) -> i32 {
+    let normalized_query = query.trim().to_lowercase();
+    if normalized_query.is_empty() {
+        return 0;
+    }
+
+    let mut score = 0i32;
+    let text = entry.text.as_deref().unwrap_or("").to_lowercase();
+    let symbol = entry.symbol.as_deref().unwrap_or("").to_lowercase();
+    let symbol_path = entry.symbol_path.as_deref().unwrap_or("").to_lowercase();
+    let file = entry.file.to_lowercase();
+    let kind = entry.kind.as_deref().unwrap_or("").to_lowercase();
+    let ref_id = entry.ref_id.to_lowercase();
+
+    if ref_id == normalized_query {
+        score += 180;
+    } else if ref_id.contains(&normalized_query) {
+        score += 120;
+    }
+    if symbol_path == normalized_query {
+        score += 170;
+    } else if symbol_path.contains(&normalized_query) {
+        score += 115;
+    }
+    if symbol == normalized_query {
+        score += 140;
+    } else if symbol.contains(&normalized_query) {
+        score += 90;
+    }
+    if text.contains(&normalized_query) {
+        score += 100;
+    }
+    if file.contains(&normalized_query) {
+        score += 80;
+    }
+    if kind == normalized_query {
+        score += 70;
+    }
+
+    for token in normalized_query.split_whitespace() {
+        if token.is_empty() {
+            continue;
+        }
+        if text.contains(token) {
+            score += 16;
+        }
+        if symbol_path.contains(token) {
+            score += 14;
+        }
+        if file.contains(token) {
+            score += 8;
+        }
+        if ref_id.contains(token) {
+            score += 8;
+        }
+    }
+
+    score
+}
+
 fn usage() {
     println!("{}", tr("LensMap CLI", "LensMap 命令行"));
     println!(
@@ -5131,6 +5755,8 @@ fn usage() {
     println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
     println!("lensmap show [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--out=path]");
     println!("lensmap simplify [--lensmap=path]");
+    println!("lensmap index [--lensmaps=a,b] [--index=path|--out=path]");
+    println!("lensmap search --query=<text> [--lensmaps=a,b] [--index=path] [--file=path] [--symbol=name|path] [--kind=comment|doc|todo|decision] [--limit=N]");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
     println!("lensmap sync [--lensmap=path] [--to=path]  # reanchor + simplify + render");
@@ -5143,6 +5769,8 @@ fn usage() {
     println!("  lensmap extract-comments --lensmap=demo/lensmap.json");
     println!("  lensmap annotate --lensmap=demo/lensmap.json --file=demo/src/app.ts --symbol=run --symbol-path=App.run --offset=1 --text=\"why this exists\"");
     println!("  lensmap show --lensmap=demo/lensmap.json --file=demo/src/app.ts");
+    println!("  lensmap index --index=demo/.lensmap-index.json");
+    println!("  lensmap search --index=demo/.lensmap-index.json --query=why");
     println!("  lensmap merge --lensmap=demo/lensmap.json");
     println!("  lensmap unmerge --lensmap=demo/lensmap.json");
     println!("  lensmap package --bundle-dir=.lenspack");
@@ -5193,6 +5821,8 @@ fn main() {
         "parse" => cmd_render(&root, &args),
         "show" => cmd_show(&root, &args),
         "simplify" => cmd_simplify(&root, &args),
+        "index" => cmd_index(&root, &args),
+        "search" => cmd_search(&root, &args),
         "polish" => cmd_polish(&root),
         "import" => cmd_import(&root, &args),
         "sync" => cmd_sync(&root, &args),
@@ -5359,6 +5989,63 @@ class Worker {
             .collect::<Vec<_>>();
         assert!(paths.contains(&"Worker.run".to_string()));
         assert!(paths.contains(&"Worker.Inner.nested".to_string()));
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn resolve_anchor_in_lines_repairs_refactor_by_signature_and_position() {
+        let source = r#"struct Task;
+struct Worker;
+
+impl Worker {
+    fn execute(&self, task: &Task) -> Result<(), String> {
+        let _ = task;
+        Ok(())
+    }
+
+    fn noop(&self) {}
+}
+"#;
+        let (path, lines) = write_temp_source(".rs", "worker_refactor", source);
+        let hits = detect_functions(&lines, &path);
+        let style = comment_style_for(&path);
+        let anchor = AnchorRecord {
+            id: "ABCDEF".to_string(),
+            file: "worker_refactor.rs".to_string(),
+            symbol: Some("run".to_string()),
+            symbol_path: Some("Worker.run".to_string()),
+            line_anchor: Some(2),
+            line_symbol: Some(3),
+            span_start: Some(3),
+            span_end: Some(5),
+            fingerprint: None,
+            signature_text: Some("fn run(&self, task: &Task) -> Result<(), String> {".to_string()),
+            updated_at: None,
+        };
+
+        let resolution = resolve_anchor_in_lines(&anchor, &lines, &hits, &style);
+        assert_eq!(resolution.strategy, "fuzzy_refactor");
+        let resolved = resolution.function_hit.expect("expected fuzzy match");
+        assert_eq!(resolved.symbol, "execute");
+        assert_eq!(resolved.symbol_path, "Worker.execute");
+        let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
+    }
+
+    #[test]
+    fn materialize_anchors_carries_signature_text() {
+        let source = r#"// @lensmap-anchor ABCDEF
+fn run(task: &str) -> bool {
+    !task.is_empty()
+}
+"#;
+        let (path, lines) = write_temp_source(".rs", "worker_anchor", source);
+        let root = path.parent().unwrap_or_else(|| Path::new("."));
+        let anchors = materialize_anchors_for_file(root, &path, &lines);
+        assert_eq!(anchors.len(), 1);
+        assert_eq!(
+            anchors[0].signature_text.as_deref(),
+            Some("fn run(task: &str) -> bool {")
+        );
         let _ = fs::remove_dir_all(path.parent().unwrap_or_else(|| Path::new(".")));
     }
 }

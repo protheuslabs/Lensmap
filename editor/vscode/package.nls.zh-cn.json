@@ -3,6 +3,10 @@
   "lensmap.description": "LensMap 代码关联文档层的编辑器集成。",
   "command.showFileNotes": "LensMap：显示当前文件注释",
   "command.annotateAtCursor": "LensMap：在光标位置添加注释",
+  "command.refreshSidebar": "LensMap：刷新侧边栏",
+  "command.searchWorkspaceNotes": "LensMap：搜索工作区注释",
+  "command.revealEntry": "LensMap：定位注释位置",
+  "view.sidebar": "LensMap",
   "config.command.description": "可选的 LensMap 可执行文件路径。留空时会自动检测本地 cargo run，或使用 PATH 中的 lensmap。",
   "config.extraArgs.description": "调用 LensMap 前附加的额外参数。"
 }

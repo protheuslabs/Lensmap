@@ -17,6 +17,13 @@ const SUPPORTED_LANGUAGES = [
   "csharp",
   "kotlin",
 ];
+const CURRENT_FILE_LIMIT = 200;
+const WORKSPACE_SEARCH_LIMIT = 80;
+
+let sidebarProvider = null;
+let sidebarView = null;
+let noteDecorationType = null;
+let refreshTimer = null;
 
 function isChineseLocale() {
   return String(vscode.env.language || "").toLowerCase().startsWith("zh");
@@ -36,19 +43,228 @@ function localizedKind(kind) {
   return map[kind] || kind || "comment";
 }
 
+function iconForKind(kind) {
+  const map = {
+    comment: "comment-discussion",
+    doc: "book",
+    todo: "checklist",
+    decision: "git-commit",
+  };
+  return map[kind] || "comment-discussion";
+}
+
+function decorationColor(kind) {
+  const map = {
+    comment: "rgba(120, 120, 120, 0.9)",
+    doc: "rgba(31, 120, 180, 0.95)",
+    todo: "rgba(186, 120, 0, 0.95)",
+    decision: "rgba(0, 140, 90, 0.95)",
+  };
+  return map[kind] || "rgba(120, 120, 120, 0.9)";
+}
+
+class LensMapSectionItem extends vscode.TreeItem {
+  constructor(label, description, children, expanded) {
+    super(
+      label,
+      expanded
+        ? vscode.TreeItemCollapsibleState.Expanded
+        : vscode.TreeItemCollapsibleState.Collapsed,
+    );
+    this.description = description;
+    this.children = children;
+    this.contextValue = "lensmapSection";
+  }
+}
+
+class LensMapEntryItem extends vscode.TreeItem {
+  constructor(entry) {
+    const symbolLabel = entry.symbol_path || entry.symbol || entry.ref || entry.file;
+    super(symbolLabel, vscode.TreeItemCollapsibleState.None);
+    this.entry = entry;
+    this.description = [localizedKind(entry.kind), formatEntryLine(entry)].filter(Boolean).join(" • ");
+    this.tooltip = buildEntryTooltip(entry);
+    this.iconPath = new vscode.ThemeIcon(iconForKind(entry.kind));
+    this.contextValue = "lensmapEntry";
+    this.command = {
+      command: "lensmap.revealEntry",
+      title: t("Reveal LensMap entry", "定位 LensMap 条目"),
+      arguments: [entry],
+    };
+  }
+}
+
+class LensMapSidebarProvider {
+  constructor() {
+    this._onDidChangeTreeData = new vscode.EventEmitter();
+    this.onDidChangeTreeData = this._onDidChangeTreeData.event;
+    this.currentFileEntries = [];
+    this.searchResults = [];
+    this.searchQuery = "";
+    this.currentFileLabel = t("Open a supported file to inspect LensMap notes.", "打开受支持的文件以查看 LensMap 注释。");
+  }
+
+  getTreeItem(item) {
+    return item;
+  }
+
+  getChildren(item) {
+    if (item && Array.isArray(item.children)) {
+      return item.children;
+    }
+
+    const currentLabel = this.currentFileTarget
+      ? `${this.currentFileTarget}`
+      : this.currentFileLabel;
+    const currentSection = new LensMapSectionItem(
+      t("Current File", "当前文件"),
+      `${this.currentFileEntries.length}`,
+      this.currentFileEntries.map((entry) => new LensMapEntryItem(entry)),
+      true,
+    );
+    currentSection.tooltip = currentLabel;
+
+    const searchSection = new LensMapSectionItem(
+      this.searchQuery
+        ? `${t("Workspace Search", "工作区搜索")}: ${this.searchQuery}`
+        : t("Workspace Search", "工作区搜索"),
+      `${this.searchResults.length}`,
+      this.searchResults.map((entry) => new LensMapEntryItem(entry)),
+      false,
+    );
+
+    return [currentSection, searchSection];
+  }
+
+  async refresh(editor) {
+    const targetEditor = editor || vscode.window.activeTextEditor;
+    const snapshot = await loadCurrentFileEntries(targetEditor);
+    this.currentFileEntries = snapshot.entries;
+    this.currentFileTarget = snapshot.label;
+    this.currentFileLabel = snapshot.message;
+
+    if (sidebarView) {
+      sidebarView.message = snapshot.info;
+    }
+    this._onDidChangeTreeData.fire();
+    return snapshot.entries;
+  }
+
+  async runWorkspaceSearch(query, workspaceRoot) {
+    const payload = await runLensmap(workspaceRoot, [
+      "search",
+      `--query=${query}`,
+      `--limit=${WORKSPACE_SEARCH_LIMIT}`,
+    ]);
+    this.searchQuery = query;
+    this.searchResults = normalizeSearchResults(payload.results || [], workspaceRoot);
+    if (sidebarView) {
+      sidebarView.message = this.searchResults.length
+        ? ""
+        : t("No LensMap results matched this search.", "没有匹配该搜索的 LensMap 结果。");
+    }
+    this._onDidChangeTreeData.fire();
+  }
+}
+
 function activate(context) {
+  sidebarProvider = new LensMapSidebarProvider();
+  sidebarView = vscode.window.createTreeView("lensmapSidebar", {
+    treeDataProvider: sidebarProvider,
+    showCollapseAll: true,
+  });
+  noteDecorationType = vscode.window.createTextEditorDecorationType({
+    after: {
+      margin: "0 0 0 1.5rem",
+      fontStyle: "italic",
+    },
+    rangeBehavior: vscode.DecorationRangeBehavior.ClosedClosed,
+  });
+
   context.subscriptions.push(
+    sidebarView,
+    noteDecorationType,
     vscode.commands.registerCommand("lensmap.showFileNotes", showFileNotes),
     vscode.commands.registerCommand("lensmap.annotateAtCursor", annotateAtCursor),
+    vscode.commands.registerCommand("lensmap.refreshSidebar", async () => {
+      await refreshLensmapUi(vscode.window.activeTextEditor);
+    }),
+    vscode.commands.registerCommand("lensmap.searchWorkspaceNotes", searchWorkspaceNotes),
+    vscode.commands.registerCommand("lensmap.revealEntry", revealEntry),
     vscode.languages.registerHoverProvider(SUPPORTED_LANGUAGES, {
       provideHover(document, position) {
         return provideLensmapHover(document, position);
       },
     }),
+    vscode.window.onDidChangeActiveTextEditor((editor) => scheduleRefresh(editor)),
+    vscode.workspace.onDidSaveTextDocument((document) => {
+      if (vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString()) {
+        scheduleRefresh(vscode.window.activeTextEditor);
+      }
+    }),
+    vscode.workspace.onDidChangeTextDocument((event) => {
+      if (vscode.window.activeTextEditor?.document.uri.toString() === event.document.uri.toString()) {
+        scheduleRefresh(vscode.window.activeTextEditor);
+      }
+    }),
   );
+
+  scheduleRefresh(vscode.window.activeTextEditor);
 }
 
-function deactivate() {}
+function deactivate() {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+}
+
+function scheduleRefresh(editor) {
+  if (refreshTimer) {
+    clearTimeout(refreshTimer);
+  }
+  refreshTimer = setTimeout(() => {
+    refreshLensmapUi(editor).catch(() => {});
+  }, 150);
+}
+
+async function refreshLensmapUi(editor) {
+  const entries = await sidebarProvider.refresh(editor);
+  applyDecorations(editor || vscode.window.activeTextEditor, entries);
+}
+
+function applyDecorations(editor, entries) {
+  if (!editor || !noteDecorationType || !isSupportedDocument(editor.document)) {
+    if (editor && noteDecorationType) {
+      editor.setDecorations(noteDecorationType, []);
+    }
+    return;
+  }
+
+  const decorations = [];
+  for (const entry of entries) {
+    if (!entry.start_line) {
+      continue;
+    }
+    const line = Math.max(entry.start_line - 1, 0);
+    if (line >= editor.document.lineCount) {
+      continue;
+    }
+    const lineText = editor.document.lineAt(line).text;
+    const position = new vscode.Position(line, lineText.length);
+    decorations.push({
+      range: new vscode.Range(position, position),
+      hoverMessage: buildEntryTooltip(entry),
+      renderOptions: {
+        after: {
+          color: decorationColor(entry.kind),
+          contentText: ` LensMap ${localizedKind(entry.kind)} ${entry.ref}: ${truncate(entry.text || "", 56)}`,
+        },
+      },
+    });
+  }
+  editor.setDecorations(noteDecorationType, decorations);
+}
 
 async function showFileNotes() {
   const editor = vscode.window.activeTextEditor;
@@ -143,6 +359,7 @@ async function annotateAtCursor() {
 
   try {
     await runLensmap(ctx.workspaceRoot, args);
+    await refreshLensmapUi(editor);
     vscode.window.showInformationMessage(
       t(`LensMap note added at ${symbol.path}.`, `已在 ${symbol.path} 添加 LensMap 注释。`),
     );
@@ -153,8 +370,49 @@ async function annotateAtCursor() {
   }
 }
 
+async function searchWorkspaceNotes() {
+  const workspaceRoot = getWorkspaceRootFromActiveEditor() || getAnyWorkspaceRoot();
+  if (!workspaceRoot) {
+    vscode.window.showErrorMessage(
+      t("Open a workspace before running LensMap search.", "运行 LensMap 搜索前请先打开工作区。"),
+    );
+    return;
+  }
+
+  const query = await vscode.window.showInputBox({
+    prompt: t("Search LensMap notes across the workspace", "在整个工作区中搜索 LensMap 注释"),
+    ignoreFocusOut: true,
+  });
+  if (!query || !query.trim()) {
+    return;
+  }
+
+  try {
+    await sidebarProvider.runWorkspaceSearch(query.trim(), workspaceRoot);
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      t(`LensMap search failed: ${error.message}`, `LensMap 搜索失败：${error.message}`),
+    );
+  }
+}
+
+async function revealEntry(entry) {
+  if (!entry || !entry.workspaceRoot || !entry.file) {
+    return;
+  }
+  const absPath = path.join(entry.workspaceRoot, fromPosix(entry.file));
+  const uri = vscode.Uri.file(absPath);
+  const document = await vscode.workspace.openTextDocument(uri);
+  const editor = await vscode.window.showTextDocument(document, { preview: false });
+  const line = Math.max((entry.start_line || 1) - 1, 0);
+  const targetLine = Math.min(line, Math.max(document.lineCount - 1, 0));
+  const position = new vscode.Position(targetLine, 0);
+  editor.selection = new vscode.Selection(position, position);
+  editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
+}
+
 async function provideLensmapHover(document, position) {
-  const ctx = await resolveLensmapContext(document.uri);
+  const ctx = await resolveLensmapContext(document.uri, { silent: true });
   if (!ctx) {
     return undefined;
   }
@@ -220,26 +478,136 @@ async function provideLensmapHover(document, position) {
   return new vscode.Hover(markdown);
 }
 
-async function resolveLensmapContext(uri) {
+async function loadCurrentFileEntries(editor) {
+  if (!editor || !isSupportedDocument(editor.document)) {
+    return {
+      entries: [],
+      label: t("No supported file selected.", "当前未选择受支持的文件。"),
+      message: t("Open a supported file to inspect LensMap notes.", "打开受支持的文件以查看 LensMap 注释。"),
+      info: t("Open a supported file to inspect LensMap notes.", "打开受支持的文件以查看 LensMap 注释。"),
+    };
+  }
+
+  const folder = vscode.workspace.getWorkspaceFolder(editor.document.uri);
+  if (!folder) {
+    return {
+      entries: [],
+      label: t("No workspace", "没有工作区"),
+      message: t("LensMap needs the file to be inside an open workspace.", "LensMap 要求当前文件位于已打开的工作区中。"),
+      info: t("LensMap needs the file to be inside an open workspace.", "LensMap 要求当前文件位于已打开的工作区中。"),
+    };
+  }
+
+  const workspaceRoot = folder.uri.fsPath;
+  const relativeFile = toPosix(path.relative(workspaceRoot, editor.document.uri.fsPath));
+  try {
+    const payload = await runLensmap(workspaceRoot, [
+      "search",
+      `--query=${relativeFile}`,
+      `--file=${relativeFile}`,
+      `--limit=${CURRENT_FILE_LIMIT}`,
+    ]);
+    const entries = normalizeSearchResults(payload.results || [], workspaceRoot);
+    return {
+      entries,
+      label: relativeFile,
+      message: relativeFile,
+      info: entries.length
+        ? ""
+        : t("No LensMap notes for the current file.", "当前文件没有 LensMap 注释。"),
+    };
+  } catch (error) {
+    return {
+      entries: [],
+      label: relativeFile,
+      message: relativeFile,
+      info: t(`LensMap search failed: ${error.message}`, `LensMap 搜索失败：${error.message}`),
+    };
+  }
+}
+
+function normalizeSearchResults(results, workspaceRoot) {
+  return (Array.isArray(results) ? results : []).map((entry) => ({
+    lensmap: entry.lensmap,
+    file: entry.file,
+    ref: entry.ref,
+    anchor_id: entry.anchor_id,
+    kind: entry.kind || "comment",
+    text: entry.text || "",
+    symbol: entry.symbol || "",
+    symbol_path: entry.symbol_path || entry.symbol || "",
+    start_line: Number.isInteger(entry.start_line) ? entry.start_line : null,
+    end_line: Number.isInteger(entry.end_line) ? entry.end_line : null,
+    resolve_strategy: entry.resolve_strategy || "",
+    workspaceRoot,
+  }));
+}
+
+function formatEntryLine(entry) {
+  if (!entry.start_line) {
+    return t("line ?", "第 ? 行");
+  }
+  if (entry.end_line && entry.end_line !== entry.start_line) {
+    return isChineseLocale()
+      ? `第 ${entry.start_line}-${entry.end_line} 行`
+      : `line ${entry.start_line}-${entry.end_line}`;
+  }
+  return isChineseLocale() ? `第 ${entry.start_line} 行` : `line ${entry.start_line}`;
+}
+
+function buildEntryTooltip(entry) {
+  const markdown = new vscode.MarkdownString(undefined, true);
+  markdown.isTrusted = false;
+  markdown.appendMarkdown(`**${entry.symbol_path || entry.ref}**\n\n`);
+  markdown.appendMarkdown(`- ${t("Ref", "引用")}: \`${entry.ref}\`\n`);
+  markdown.appendMarkdown(`- ${t("Kind", "类型")}: \`${localizedKind(entry.kind)}\`\n`);
+  markdown.appendMarkdown(`- ${t("File", "文件")}: \`${entry.file}\`\n`);
+  if (entry.start_line) {
+    markdown.appendMarkdown(`- ${t("Position", "位置")}: ${formatEntryLine(entry)}\n`);
+  }
+  if (entry.text) {
+    markdown.appendMarkdown("\n");
+    markdown.appendText(entry.text);
+  }
+  return markdown;
+}
+
+function truncate(value, limit) {
+  const text = String(value || "").replace(/\s+/g, " ").trim();
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(limit - 1, 1))}…`;
+}
+
+function isSupportedDocument(document) {
+  return !!document && SUPPORTED_LANGUAGES.includes(document.languageId);
+}
+
+async function resolveLensmapContext(uri, options = {}) {
   const folder = vscode.workspace.getWorkspaceFolder(uri);
   if (!folder) {
-    vscode.window.showErrorMessage(
-      t(
-        "LensMap needs the file to be inside an open workspace.",
-        "LensMap 要求当前文件位于已打开的工作区中。",
-      ),
-    );
+    if (!options.silent) {
+      vscode.window.showErrorMessage(
+        t(
+          "LensMap needs the file to be inside an open workspace.",
+          "LensMap 要求当前文件位于已打开的工作区中。",
+        ),
+      );
+    }
     return null;
   }
 
   const lensmapPath = await findLensmapForFile(uri, folder);
   if (!lensmapPath) {
-    vscode.window.showErrorMessage(
-      t(
-        "LensMap could not find a lensmap.json for this file.",
-        "LensMap 找不到当前文件对应的 lensmap.json。",
-      ),
-    );
+    if (!options.silent) {
+      vscode.window.showErrorMessage(
+        t(
+          "LensMap could not find a lensmap.json for this file.",
+          "LensMap 找不到当前文件对应的 lensmap.json。",
+        ),
+      );
+    }
     return null;
   }
 
@@ -258,6 +626,7 @@ async function findLensmapForFile(uri, folder) {
     if (fs.existsSync(direct)) {
       return direct;
     }
+
     const entries = safeReadDir(current).filter((name) => name.endsWith(".lensmap.json"));
     if (entries.length > 0) {
       return path.join(current, entries[0]);
@@ -427,8 +796,22 @@ function parseLensmapPayload(text) {
   }
 }
 
+function getWorkspaceRootFromActiveEditor() {
+  const editor = vscode.window.activeTextEditor;
+  const folder = editor ? vscode.workspace.getWorkspaceFolder(editor.document.uri) : null;
+  return folder ? folder.uri.fsPath : null;
+}
+
+function getAnyWorkspaceRoot() {
+  return vscode.workspace.workspaceFolders?.[0]?.uri.fsPath || null;
+}
+
 function toPosix(value) {
   return value.split(path.sep).join("/");
+}
+
+function fromPosix(value) {
+  return String(value || "").split("/").join(path.sep);
 }
 
 module.exports = {

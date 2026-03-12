@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.8
+- Upgraded the JetBrains plugin from action-only dialogs to a persistent `LensMap` tool window with refreshable current-file and search output.
+- Kept the JetBrains current-file, workspace-search, and caret-annotation actions, but routed their output through the tool window.
+- Removed the deprecated JetBrains chooser call from the note-kind prompt.
+
+## 0.3.7
+- Added signature-aware fuzzy anchor repair so reanchor/render/search can recover more large refactors before falling back to line hints.
+- Added repo-wide `index` and `search` commands plus `.lensmap-index.json` output for searchable note catalogs.
+- Expanded the VS Code integration with an Explorer sidebar, workspace search, and inline current-file decorations.
+- Added a buildable JetBrains plugin scaffold with actions for current-file notes, workspace search, and caret annotation.
+
 ## 0.3.6
 - Added AST-backed symbol/span detection for C, C++, C#, and Kotlin.
 - Extended the VS Code integration to C/C++/C#/Kotlin files and bumped the packaged extension to `0.2.1`.

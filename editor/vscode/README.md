@@ -5,7 +5,10 @@ Minimal VS Code integration for LensMap.
 ## Features
 
 - Show LensMap notes for the current file
+- Explorer sidebar with current-file notes and workspace search results
 - Add a LensMap note at the cursor
+- Refresh the sidebar and search LensMap notes across the workspace
+- Inline end-of-line decorations for current-file notes
 - Hover on `@lensmap-anchor` and `@lensmap-ref`
 - Follows the VS Code UI language and supports English and Chinese
 - Supports JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin files

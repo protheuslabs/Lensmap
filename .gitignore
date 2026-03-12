@@ -6,4 +6,7 @@
 /.vscode/
 .DS_Store
 /artifacts/*.vsix
+/artifacts/*.zip
 /editor/vscode/node_modules/
+/editor/jetbrains/.gradle/
+/editor/jetbrains/build/

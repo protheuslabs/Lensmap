@@ -2,7 +2,7 @@
   "name": "lensmap-vscode",
   "displayName": "%lensmap.displayName%",
   "description": "%lensmap.description%",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "protheuslabs",
   "license": "MIT",
   "homepage": "https://github.com/protheuslabs/Lensmap",
@@ -26,6 +26,10 @@
   "activationEvents": [
     "onCommand:lensmap.showFileNotes",
     "onCommand:lensmap.annotateAtCursor",
+    "onCommand:lensmap.refreshSidebar",
+    "onCommand:lensmap.searchWorkspaceNotes",
+    "onCommand:lensmap.revealEntry",
+    "onView:lensmapSidebar",
     "onLanguage:javascript",
     "onLanguage:javascriptreact",
     "onLanguage:typescript",
@@ -63,8 +67,42 @@
       {
         "command": "lensmap.annotateAtCursor",
         "title": "%command.annotateAtCursor%"
+      },
+      {
+        "command": "lensmap.refreshSidebar",
+        "title": "%command.refreshSidebar%"
+      },
+      {
+        "command": "lensmap.searchWorkspaceNotes",
+        "title": "%command.searchWorkspaceNotes%"
+      },
+      {
+        "command": "lensmap.revealEntry",
+        "title": "%command.revealEntry%"
       }
     ],
+    "views": {
+      "explorer": [
+        {
+          "id": "lensmapSidebar",
+          "name": "%view.sidebar%"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "lensmap.refreshSidebar",
+          "when": "view == lensmapSidebar",
+          "group": "navigation@1"
+        },
+        {
+          "command": "lensmap.searchWorkspaceNotes",
+          "when": "view == lensmapSidebar",
+          "group": "navigation@2"
+        }
+      ]
+    },
     "configuration": {
       "title": "%lensmap.displayName%",
       "properties": {

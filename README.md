@@ -14,10 +14,13 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 - Adds deterministic function anchor nodes (`@lensmap-anchor <HEXID>`) with smart anchoring by default.
 - Stores comments/docs externally as references (`<HEXID>-<offset>` or `<HEXID>-<start>-<end>`).
 - Resolves anchors using source anchor ID first, then AST-backed symbol path and fingerprint metadata, then stored line/span hints.
+- Repairs large refactors with signature-aware fuzzy matching before falling back to line hints.
 - Supports AST-backed symbol resolution for JavaScript, TypeScript, Python, Rust, Go, Java, C, C++, C#, and Kotlin.
+- Builds a searchable repo-wide note index and supports structured CLI search.
 - Extracts inline/source comments into lens entries.
 - Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
-- Includes a minimal VS Code integration for show/annotate/hover workflows.
+- Includes VS Code sidebar, decorations, search, show/annotate, and hover workflows.
+- Includes a JetBrains plugin with a persistent tool window plus current-file, workspace-search, and caret-annotation actions.
 - Supports English and Chinese in the CLI and editor integration.
 - Validates marker coherence, collisions, drift, and root-path safety.
 
@@ -142,6 +145,8 @@ lensmap validate --lensmap=demo/lensmap.json
 - `parse` (alias of `render`)
 - `show` (filtered readable view by file, symbol, ref, or kind)
 - `simplify`
+- `index` (build a repo-wide `.lensmap-index.json`)
+- `search` (search repo notes live or through a saved index)
 - `polish`
 - `import`
 - `sync` (reanchor + simplify + render Markdown sidecar)
@@ -183,6 +188,10 @@ Current capabilities:
 
 - `LensMap: Show Notes for Current File`
 - `LensMap: Add Note at Cursor`
+- Explorer sidebar with current-file notes and workspace search results
+- Inline end-of-line note decorations for current-file entries
+- `LensMap: Refresh Sidebar`
+- `LensMap: Search Workspace Notes`
 - hover support for `@lensmap-anchor` and `@lensmap-ref`
 - follows the VS Code UI language for English/Chinese prompts and messages
 
@@ -197,6 +206,27 @@ npm run package:vsix
 ```
 
 That writes a `.vsix` bundle to `artifacts/lensmap-vscode-<version>.vsix`.
+
+## JetBrains plugin
+
+There is now a minimal JetBrains plugin in `editor/jetbrains/`.
+
+Current capabilities:
+
+- Persistent `LensMap` tool window for readable current-file or search output
+- `LensMap > Show Current File Notes`
+- `LensMap > Search Workspace Notes`
+- `LensMap > Add Note at Caret`
+- English/Chinese prompts and notifications
+
+Build the plugin:
+
+```bash
+cd editor/jetbrains
+./gradlew buildPlugin
+```
+
+The packaged plugin ZIP is written to `editor/jetbrains/build/distributions/`.
 
 ## Packaging workflow
 

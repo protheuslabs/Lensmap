@@ -1,0 +1,38 @@
+<idea-plugin>
+  <id>dev.lensmap.jetbrains</id>
+  <name>LensMap</name>
+  <vendor email="support@lensmap.dev" url="https://github.com/protheuslabs/Lensmap">protheuslabs</vendor>
+  <description><![CDATA[
+    JetBrains actions for showing, searching, and annotating LensMap notes.
+  ]]></description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <notificationGroup id="LensMap" displayType="BALLOON"/>
+    <toolWindow id="LensMap"
+                anchor="right"
+                secondary="true"
+                factoryClass="dev.lensmap.jetbrains.LensMapToolWindowFactory"/>
+  </extensions>
+  <actions>
+    <group id="LensMap.Group" text="LensMap" popup="true">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+      <action id="LensMap.ShowFileNotes"
+              class="dev.lensmap.jetbrains.ShowFileNotesAction"
+              text="Show Current File Notes"
+              description="Show LensMap notes for the active file"/>
+      <action id="LensMap.SearchWorkspace"
+              class="dev.lensmap.jetbrains.SearchWorkspaceNotesAction"
+              text="Search Workspace Notes"
+              description="Search LensMap notes across the current project"/>
+      <action id="LensMap.AnnotateAtCaret"
+              class="dev.lensmap.jetbrains.AnnotateAtCaretAction"
+              text="Add Note at Caret"
+              description="Create a LensMap note for the symbol near the caret"/>
+    </group>
+    <group id="LensMap.EditorPopupGroup" text="LensMap" popup="true">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <reference ref="LensMap.ShowFileNotes"/>
+      <reference ref="LensMap.AnnotateAtCaret"/>
+    </group>
+  </actions>
+</idea-plugin>
