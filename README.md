@@ -23,7 +23,7 @@ LensMap is a code-linked documentation layer. It keeps source files lean by movi
 - Extracts inline/source comments into lens entries.
 - Maintains a readable Markdown sidecar alongside the canonical JSON lensmap.
 - Includes VS Code sidebar, decorations, search, show/annotate, and hover workflows.
-- Includes a JetBrains plugin with a persistent tool window plus current-file, workspace-search, and caret-annotation actions.
+- Includes a JetBrains plugin with a persistent note browser tool window, plus current-file, workspace-search, jump, copy-ref, and caret annotation/edit flows.
 - Supports English and Chinese in the CLI and editor integration.
 - Validates marker coherence, collisions, drift, and root-path safety.
 
@@ -50,14 +50,14 @@ Keep inline comments for:
 - Linux/macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | bash -s -- v0.3.0
+curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | bash -s -- v0.3.10
 ```
 
 - Windows (PowerShell):
 
 ```powershell
 iwr https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.ps1 -OutFile install.ps1
-./install.ps1 -Version v0.3.0
+./install.ps1 -Version v0.3.10
 ```
 
 ### From source
@@ -216,15 +216,16 @@ That writes a `.vsix` bundle to `artifacts/lensmap-vscode-<version>.vsix`.
 
 ## JetBrains plugin
 
-There is now a minimal JetBrains plugin in `editor/jetbrains/`.
+There is now a JetBrains plugin in `editor/jetbrains/` with a persistent note browser tool window.
 
 Current capabilities:
 
-- Persistent `LensMap` tool window for readable current-file or search output
+- Persistent `LensMap` note browser for current-file or search output
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
+- Open the selected note in source, copy its ref, and edit the selected entry in place
 - English/Chinese prompts and notifications
 
 Build the plugin:

@@ -2,7 +2,7 @@
   "name": "lensmap-vscode",
   "displayName": "%lensmap.displayName%",
   "description": "%lensmap.description%",
-  "version": "0.3.1",
+  "version": "0.3.10",
   "publisher": "protheuslabs",
   "license": "MIT",
   "homepage": "https://github.com/protheuslabs/Lensmap",

@@ -3,7 +3,7 @@
   <name>LensMap</name>
   <vendor email="support@lensmap.dev" url="https://github.com/protheuslabs/Lensmap">protheuslabs</vendor>
   <description><![CDATA[
-    JetBrains tool window and actions for showing, searching, annotating, and editing LensMap notes.
+    JetBrains note browser tool window and actions for showing, searching, annotating, editing, opening, and copying LensMap notes.
   ]]></description>
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">

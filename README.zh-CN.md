@@ -98,13 +98,14 @@ npm run package:vsix
 
 ## JetBrains 插件
 
-`editor/jetbrains` 中包含一个最小可用的 JetBrains 插件，支持：
+`editor/jetbrains` 中包含一个 JetBrains 插件，支持：
 
-- 持久化 `LensMap` 工具窗口，用于展示当前文件或搜索结果
+- 持久化 `LensMap` 工具窗口，带有结构化注释列表和详情面板
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
+- 在工具窗口中打开源码位置、复制引用、编辑所选注释
 - 英文/中文提示与通知
 
 构建方式：

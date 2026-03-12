@@ -10,9 +10,11 @@ import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.CommonDataKeys
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.fileEditor.OpenFileDescriptor
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
@@ -20,19 +22,29 @@ import com.intellij.openapi.wm.ToolWindowManager
 import com.intellij.psi.PsiFile
 import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiNamedElement
+import com.intellij.ui.SimpleListCellRenderer
+import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
 import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.content.ContentFactory
 import java.awt.BorderLayout
 import java.awt.FlowLayout
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
+import java.awt.event.MouseAdapter
+import java.awt.event.MouseEvent
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
 import java.util.Locale
 import javax.swing.JButton
+import javax.swing.DefaultListModel
 import javax.swing.JLabel
+import javax.swing.JList
 import javax.swing.JPanel
+import javax.swing.JSplitPane
+import javax.swing.ListSelectionModel
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
 
@@ -139,18 +151,49 @@ private fun parseResults(payload: JsonObject): List<SearchEntry> {
 }
 
 private fun formatEntry(entry: SearchEntry): String {
-    val label = entry.symbolPath.ifBlank { entry.symbol.ifBlank { entry.ref } }
-    val line = when {
+    val label = entryLabel(entry)
+    val line = entryLineLabel(entry)
+    val body = entry.text.ifBlank { t("(no text)", "（无文本）") }
+    return buildString {
+        append("- [${entry.ref}] $label • ${entry.kind} • $line")
+        append("\n  ")
+        append(body)
+    }
+}
+
+private fun entryLabel(entry: SearchEntry): String =
+    entry.symbolPath.ifBlank { entry.symbol.ifBlank { entry.ref } }
+
+private fun entryLineLabel(entry: SearchEntry): String =
+    when {
         entry.startLine == null -> t("line ?", "第 ? 行")
         entry.endLine != null && entry.endLine != entry.startLine -> {
             if (isChinese()) "第 ${entry.startLine}-${entry.endLine} 行" else "line ${entry.startLine}-${entry.endLine}"
         }
         else -> if (isChinese()) "第 ${entry.startLine} 行" else "line ${entry.startLine}"
     }
+
+private fun entrySummary(entry: SearchEntry): String =
+    "${entryLabel(entry)} • ${entry.kind} • ${entryLineLabel(entry)}"
+
+private fun entryDetail(entry: SearchEntry): String {
     val body = entry.text.ifBlank { t("(no text)", "（无文本）") }
     return buildString {
-        append("- [${entry.ref}] $label • ${entry.kind} • $line")
-        append("\n  ")
+        append(entryLabel(entry))
+        append('\n')
+        append("${t("File", "文件")}: ${entry.file}")
+        append('\n')
+        append("${t("Kind", "类型")}: ${entry.kind}")
+        append('\n')
+        append("${t("Reference", "引用")}: ${entry.ref}")
+        append('\n')
+        append("${t("Range", "范围")}: ${entryLineLabel(entry)}")
+        if (entry.lensmap.isNotBlank()) {
+            append('\n')
+            append("${t("LensMap", "LensMap 文件")}: ${entry.lensmap}")
+        }
+        append('\n')
+        append('\n')
         append(body)
     }
 }
@@ -172,15 +215,41 @@ private fun showMultiline(project: Project, title: String, content: String) {
 
 private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWindowPanel>(BorderLayout()) {
     private val titleLabel = JLabel(TOOL_WINDOW_ID)
-    private val bodyArea = JBTextArea().apply {
+    private val subtitleLabel = JLabel(t("Select a LensMap note to inspect it here.", "选择一个 LensMap 注释以查看详情。"))
+    private val detailArea = JBTextArea().apply {
         isEditable = false
         lineWrap = true
         wrapStyleWord = true
     }
+    private val entryModel = DefaultListModel<SearchEntry>()
+    private val entryList = JBList(entryModel).apply {
+        selectionMode = ListSelectionModel.SINGLE_SELECTION
+        cellRenderer = SimpleListCellRenderer.create<SearchEntry> { label, value, _ ->
+            label.text = value?.let(::entrySummary) ?: ""
+        }
+        addListSelectionListener { updateDetail() }
+        addMouseListener(object : MouseAdapter() {
+            override fun mouseClicked(event: MouseEvent) {
+                if (event.clickCount >= 2) {
+                    selectedValue?.let { openEntryInEditor(project, it) }
+                }
+            }
+        })
+    }
     private val refreshButton = JButton(t("Refresh", "刷新")).apply {
         isEnabled = false
     }
+    private val openButton = JButton(t("Open Note", "打开注释")).apply {
+        isEnabled = false
+    }
+    private val copyRefButton = JButton(t("Copy Ref", "复制引用")).apply {
+        isEnabled = false
+    }
+    private val editSelectedButton = JButton(t("Edit Selected", "编辑所选")).apply {
+        isEnabled = false
+    }
     private var refreshAction: (() -> Unit)? = null
+    private var emptyDetail = t("No LensMap notes matched.", "没有匹配的 LensMap 注释。")
 
     init {
         val toolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 8))
@@ -227,6 +296,14 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         }
 
         refreshButton.addActionListener { refreshAction?.invoke() }
+        openButton.addActionListener { entryList.selectedValue?.let { openEntryInEditor(project, it) } }
+        copyRefButton.addActionListener { entryList.selectedValue?.let(::copyEntryRef) }
+        editSelectedButton.addActionListener {
+            entryList.selectedValue?.let {
+                editEntry(project, it)
+                refreshAction?.invoke()
+            }
+        }
 
         toolbar.add(currentFileButton)
         toolbar.add(searchButton)
@@ -234,20 +311,58 @@ private class LensMapToolWindowPanel(project: Project) : JBPanel<LensMapToolWind
         toolbar.add(editButton)
         toolbar.add(refreshButton)
 
+        val selectionToolbar = JPanel(FlowLayout(FlowLayout.LEFT, 8, 0))
+        selectionToolbar.add(openButton)
+        selectionToolbar.add(copyRefButton)
+        selectionToolbar.add(editSelectedButton)
+
         val header = JPanel(BorderLayout())
-        header.add(titleLabel, BorderLayout.NORTH)
+        val heading = JPanel(BorderLayout())
+        heading.add(titleLabel, BorderLayout.NORTH)
+        heading.add(subtitleLabel, BorderLayout.CENTER)
+        header.add(heading, BorderLayout.NORTH)
         header.add(toolbar, BorderLayout.CENTER)
+        header.add(selectionToolbar, BorderLayout.SOUTH)
+
+        val splitPane = JSplitPane(
+            JSplitPane.VERTICAL_SPLIT,
+            JBScrollPane(entryList),
+            JBScrollPane(detailArea),
+        ).apply {
+            resizeWeight = 0.45
+        }
 
         add(header, BorderLayout.NORTH)
-        add(JBScrollPane(bodyArea), BorderLayout.CENTER)
+        add(splitPane, BorderLayout.CENTER)
     }
 
-    fun render(title: String, content: String, onRefresh: (() -> Unit)? = null) {
+    private fun updateDetail() {
+        val selected = entryList.selectedValue
+        detailArea.text = selected?.let(::entryDetail) ?: emptyDetail
+        detailArea.caretPosition = 0
+        openButton.isEnabled = selected != null
+        copyRefButton.isEnabled = selected != null
+        editSelectedButton.isEnabled = selected != null
+    }
+
+    fun render(title: String, subtitle: String, entries: List<SearchEntry>, onRefresh: (() -> Unit)? = null) {
         titleLabel.text = title
-        bodyArea.text = content
-        bodyArea.caretPosition = 0
+        subtitleLabel.text = if (entries.isEmpty()) subtitle else "$subtitle • ${entries.size} ${t("notes", "条注释")}"
+        entryModel.removeAllElements()
+        entries.forEach(entryModel::addElement)
+        emptyDetail = if (entries.isEmpty()) {
+            t("No LensMap notes matched.", "没有匹配的 LensMap 注释。")
+        } else {
+            t("Select a LensMap note to inspect it here.", "选择一个 LensMap 注释以查看详情。")
+        }
         refreshAction = onRefresh
         refreshButton.isEnabled = onRefresh != null
+        if (entries.isNotEmpty()) {
+            entryList.selectedIndex = 0
+        } else {
+            entryList.clearSelection()
+            updateDetail()
+        }
     }
 }
 
@@ -357,15 +472,21 @@ private fun ensureToolWindowPanel(project: Project, toolWindow: ToolWindow): Len
     return panel
 }
 
-private fun showInToolWindow(project: Project, title: String, content: String, onRefresh: (() -> Unit)? = null) {
+private fun showEntriesInToolWindow(
+    project: Project,
+    title: String,
+    subtitle: String,
+    entries: List<SearchEntry>,
+    onRefresh: (() -> Unit)? = null,
+) {
     val toolWindow = toolWindowManager(project)?.getToolWindow(TOOL_WINDOW_ID)
     if (toolWindow == null) {
-        showMultiline(project, title, content)
+        showMultiline(project, title, renderEntries(subtitle, entries))
         return
     }
 
     toolWindow.show {
-        ensureToolWindowPanel(project, toolWindow).render(title, content, onRefresh)
+        ensureToolWindowPanel(project, toolWindow).render(title, subtitle, entries, onRefresh)
     }
 }
 
@@ -384,10 +505,11 @@ private fun showCurrentFileNotes(project: Project, virtualFile: VirtualFile) {
     try {
         val payload = LensMapCli.run(project, listOf("search", "--query=$relative", "--file=$relative", "--limit=200"))
         val entries = parseResults(payload)
-        showInToolWindow(
+        showEntriesInToolWindow(
             project,
             t("LensMap Current File", "LensMap 当前文件"),
-            renderEntries(relative, entries),
+            relative,
+            entries,
         ) { showCurrentFileNotes(project, virtualFile) }
     } catch (error: Throwable) {
         notify(project, error.message ?: t("LensMap failed.", "LensMap 执行失败。"), NotificationType.ERROR)
@@ -404,10 +526,11 @@ private fun searchWorkspaceNotes(project: Project, query: String) {
     try {
         val payload = LensMapCli.run(project, listOf("search", "--query=$query", "--limit=80"))
         val entries = parseResults(payload)
-        showInToolWindow(
+        showEntriesInToolWindow(
             project,
             t("LensMap Workspace Search", "LensMap 工作区搜索"),
-            renderEntries(query, entries),
+            query,
+            entries,
         ) { searchWorkspaceNotes(project, query) }
     } catch (error: Throwable) {
         notify(project, error.message ?: t("LensMap search failed.", "LensMap 搜索失败。"), NotificationType.ERROR)
@@ -475,6 +598,21 @@ private fun editEntry(project: Project, entry: SearchEntry) {
     } catch (error: Throwable) {
         notify(project, error.message ?: t("LensMap edit failed.", "LensMap 编辑失败。"), NotificationType.ERROR)
     }
+}
+
+private fun openEntryInEditor(project: Project, entry: SearchEntry) {
+    val root = projectRoot(project) ?: return
+    val path = root.resolve(entry.file)
+    val virtualFile = LocalFileSystem.getInstance().refreshAndFindFileByNioFile(path) ?: run {
+        notify(project, t("Source file for this note could not be opened.", "无法打开当前注释对应的源码文件。"), NotificationType.ERROR)
+        return
+    }
+    val line = (entry.startLine ?: 1).coerceAtLeast(1) - 1
+    OpenFileDescriptor(project, virtualFile, line, 0).navigate(true)
+}
+
+private fun copyEntryRef(entry: SearchEntry) {
+    Toolkit.getDefaultToolkit().systemClipboard.setContents(StringSelection(entry.ref), null)
 }
 
 private fun editNoteAtCaret(project: Project, editor: Editor, virtualFile: VirtualFile) {

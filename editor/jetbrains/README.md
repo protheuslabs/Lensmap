@@ -1,14 +1,15 @@
 # LensMap JetBrains Plugin
 
-Minimal JetBrains integration for LensMap with a persistent tool window.
+JetBrains integration for LensMap with a persistent note browser tool window.
 
 ## Features
 
-- `LensMap` tool window with refreshable note output
+- `LensMap` tool window with a structured note list and detail pane
 - `LensMap > Show Current File Notes`
 - `LensMap > Search Workspace Notes`
 - `LensMap > Add Note at Caret`
 - `LensMap > Edit Note at Caret`
+- Open the selected note in source, copy its ref, and edit the selected entry from the tool window
 - English and Chinese prompts/notifications
 
 ## Build

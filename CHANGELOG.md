@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.10
+- Normalized the release version across the Rust CLI, VS Code extension, and JetBrains plugin so artifacts and tags line up again.
+- Upgraded the JetBrains tool window from a plain text dump to a structured note browser with a selectable list and detail pane.
+- Added JetBrains note-browser actions for opening the selected note in source, copying its LensMap ref, and editing the selected entry in place.
+- Updated installation and editor docs to reflect the unified `v0.3.10` release.
+
 ## 0.3.9
 - Switched new anchors to inline placement by default, with standalone fallback when inline comments are unsafe for the source line.
 - Normalized ref math to symbol-relative offsets so inline and standalone anchors preserve the same reference semantics.
