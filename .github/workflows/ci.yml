@@ -3,13 +3,38 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "release/*"]
 
 jobs:
-  build:
+  quality:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check
-        run: cargo check --workspace --all-targets
+        with:
+          components: clippy
+      - name: Rust format
+        run: scripts/check-rust-format.sh
+      - name: Lint
+        run: cargo clippy --workspace --all-targets --all-features
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build and test
+        run: |
+          cargo check --workspace --all-targets
+          cargo test --workspace --all-targets
+
+  production-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Production strip gate
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: cargo run --locked -- strip --source=. --check --clean-anchors=true --clean-refs=true --exclude-patterns='target/**,node_modules/**,dist/**,.git/**,.lenspack/**'
+      - name: Policy check
+        run: cargo run --locked -- policy check --fail-on-warnings

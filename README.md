@@ -51,6 +51,7 @@ Resolution order is designed to survive normal refactors:
 - Repo summaries and PR-oriented reporting from git diff without GitHub API dependence
 - Merge and unmerge workflows for round-tripping notes into source when needed
 - Packaging and unpackaging for post-production documentation handling
+- Production stripping for marker-free source delivery (`strip` and `package --strip-sources`)
 - VS Code and JetBrains integration for browsing and editing notes in-editor
 - English and Chinese CLI and editor support
 - Fail-closed root-path safety for generated artifacts and package operations
@@ -86,6 +87,13 @@ Windows PowerShell:
 ```powershell
 iwr https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.ps1 -OutFile install.ps1
 ./install.ps1 -Version v0.3.12
+```
+
+To verify release integrity, use the published checksum file. Enable verification with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | VERIFY_CHECKSUMS=1 bash -s -- v0.3.12
+./install.ps1 -Version v0.3.12 -VerifyChecksums
 ```
 
 ### Build from source
@@ -157,7 +165,11 @@ lensmap policy init \
   --require-template=true \
   --require-review-status=true \
   --stale-after-days=30 \
-  --required-patterns='demo/src/*.rs,demo/src/*.ts'
+  --required-patterns='demo/src/*.rs,demo/src/*.ts' \
+  --production-strip-anchors=true \
+  --production-strip-refs=true \
+  --production-strip-on-package=true \
+  --production-exclude-patterns='**/tests/**,**/generated/**'
 ```
 
 Run CI-facing policy checks. By default, LensMap now discovers and aggregates every map under the repository root:
@@ -171,6 +183,12 @@ Generate repo summaries and PR reports:
 ```bash
 lensmap summary --out=local/state/lensmap/summary.md
 lensmap pr report --strict --out=local/state/lensmap/pr-report.md
+```
+
+Production enforcement can be enabled explicitly:
+
+```bash
+lensmap policy check --production --fail-on-warnings
 ```
 
 Narrow the governance scope only when required:
@@ -201,6 +219,7 @@ lensmap merge --lensmap=demo/lensmap.json
 
 ```bash
 lensmap unmerge --lensmap=demo/lensmap.json
+lensmap unmerge --lensmap=demo/lensmap.json --strip --clean-anchors=true --clean-refs=true
 ```
 
 ### Package documentation to a root bundle
@@ -208,6 +227,25 @@ lensmap unmerge --lensmap=demo/lensmap.json
 ```bash
 lensmap package --bundle-dir=.lenspack
 lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
+```
+
+### Produce marker-free production sources
+
+```bash
+lensmap strip --source=demo/src --out-dir=demo/dist/prod --clean-anchors=true --clean-refs=true
+```
+
+### Fail build if production markers remain
+
+```bash
+lensmap strip --source=. --check --clean-anchors=true --clean-refs=true
+```
+
+### Package docs + stripped production sources together
+
+```bash
+lensmap package --bundle-dir=.lenspack --strip-sources --out-format=tar.gz
+lensmap package --bundle-dir=.lenspack --production --out-format=tar.gz
 ```
 
 ## Command Surface
@@ -218,7 +256,7 @@ lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt
 | Notes | `annotate`, `extract-comments`, `merge`, `unmerge`, `simplify` |
 | Templates and policy | `template add`, `template list`, `policy init`, `policy check` (aggregates all discovered LensMaps by default) |
 | Reading and reporting | `render`, `parse`, `show`, `index`, `search`, `summary`, `pr report` |
-| Packaging and utility | `package`, `unpackage`, `polish`, `import`, `expose` |
+| Packaging and utility | `package`, `package evidence`, `strip`, `verify`, `restore`, `unpackage`, `polish`, `import`, `expose` |
 
 Run `lensmap --help` for the full command signature set.
 
@@ -232,6 +270,51 @@ Run `lensmap --help` for the full command signature set.
 
 - Python: `# @lensmap-anchor ...` and `# @lensmap-ref ...`
 - JS/TS/Rust/Go/Java/C/C++/C#/Kotlin: `// @lensmap-anchor ...` and `// @lensmap-ref ...`
+
+## Build and Release Hooks
+
+### Cargo / Rust
+
+```bash
+cargo run --bin lensmap -- strip --source=. --check --clean-anchors=true --clean-refs=true
+cargo run --bin lensmap -- package --bundle-dir=.lenspack --production --out-format=tar.gz
+```
+
+### npm / JS-TS
+
+```json
+{
+  "scripts": {
+    "lensmap:strip": "lensmap strip --source=src --out-dir=dist/prod",
+    "lensmap:check": "lensmap strip --source=. --check --clean-anchors=true --clean-refs=true"
+  }
+}
+```
+
+### Gradle / Maven pre-release hook
+
+Run `lensmap strip --source=src --out-dir=build/lensmap-prod` before archive tasks.
+
+### GitHub Actions
+
+```yaml
+- name: Policy and packaging gate
+  run: cargo run --locked -- policy check --fail-on-warnings
+- name: LensMap strip gate
+  run: cargo run --locked -- strip --source=. --check --clean-anchors=true --clean-refs=true
+- name: LensMap production package
+  run: cargo run --locked -- package --bundle-dir=.lenspack --production --out-format=tar.gz
+```
+
+### Release artifact hardening
+
+- Release workflows now publish SHA-256 checksum files and deterministic build manifests for each platform target.
+- Release assets are attestation-ready through GitHub artifact attestation (`actions/attest-build-provenance`).
+- The release manifest can be used for reproducibility checks:
+  - artifact hash
+  - source commit
+  - target platform
+  - build format
 
 ## Editor Integration
 

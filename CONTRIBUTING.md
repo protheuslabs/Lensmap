@@ -12,6 +12,7 @@ cargo run -p lensmap -- --help
 ```bash
 cargo check --workspace --all-targets
 cargo clippy --workspace --all-targets -- -D warnings
+scripts/check-rust-format.sh
 ```
 
 ## Release process

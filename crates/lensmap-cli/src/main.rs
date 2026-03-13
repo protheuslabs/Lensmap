@@ -1,4 +1,6 @@
 use chrono::{DateTime, Duration, Utc};
+use flate2::write::GzEncoder;
+use flate2::Compression;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -10,6 +12,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use tar::Builder;
 use tree_sitter::{Node, Parser};
 use walkdir::WalkDir;
 
@@ -43,6 +46,7 @@ const PRESERVE_COMMENT_PREFIXES: &[&str] = &[
 ];
 const ANCHOR_TAG: &str = "@lensmap-anchor";
 const REF_TAG: &str = "@lensmap-ref";
+const COMMAND_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Default)]
 struct ParsedArgs {
@@ -221,6 +225,12 @@ struct PackageItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     last_error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    source_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    packaged_hash: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     updated_at: Option<String>,
 }
 
@@ -232,9 +242,97 @@ struct PackageManifest {
     version: String,
     root: String,
     bundle_dir: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle_family: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    envelope_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    redaction_profile: Option<String>,
+    #[serde(default)]
+    retention_days: i64,
     created_at: String,
     updated_at: String,
     items: Vec<PackageItem>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct EvidenceArtifact {
+    path: String,
+    kind: String,
+    hash: String,
+    bytes: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
+struct EvidenceEnvelope {
+    #[serde(rename = "type")]
+    doc_type: String,
+    version: String,
+    command_version: String,
+    command: String,
+    command_profile: String,
+    command_identity: String,
+    policy_hash: String,
+    execution_fingerprint: String,
+    redaction_profile: String,
+    retention_window_days: i64,
+    started_at: String,
+    finished_at: String,
+    status: String,
+    status_code: i32,
+    input_artifacts: Vec<EvidenceArtifact>,
+    output_artifacts: Vec<EvidenceArtifact>,
+    errors: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct EvidenceCheckpoint {
+    #[serde(default)]
+    command: String,
+    #[serde(default)]
+    bundle_dir: String,
+    #[serde(default)]
+    command_version: String,
+    #[serde(default)]
+    run_id: String,
+    #[serde(default)]
+    compression_mode: String,
+    #[serde(default)]
+    redaction_profile: String,
+    #[serde(default)]
+    retention_days: i64,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    completed: Vec<String>,
+    #[serde(default)]
+    skipped: Vec<String>,
+    #[serde(default)]
+    errors: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceCompressionMode {
+    None,
+    Copy,
+}
+
+impl EvidenceCompressionMode {
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_lowercase().as_str() {
+            "copy" => Self::Copy,
+            _ => Self::None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Copy => "copy",
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -397,6 +495,16 @@ struct PolicySettings {
     required_patterns: Vec<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default, rename_all = "camelCase")]
+struct ProductionSettings {
+    strip_anchors: bool,
+    strip_refs: bool,
+    strip_on_package: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    exclude_patterns: Vec<String>,
+}
+
 struct PrReportRender<'a> {
     base: Option<&'a str>,
     head: Option<&'a str>,
@@ -420,6 +528,15 @@ struct ValidationFindings {
     errors: Vec<String>,
     warnings: Vec<String>,
     lensmap_dirty: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct StripSummary {
+    files_scanned: usize,
+    files_changed: usize,
+    anchors_removed: usize,
+    refs_removed: usize,
+    marker_hits: usize,
 }
 
 #[derive(Serialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -486,11 +603,52 @@ struct AutobotReceipt {
     checkpoint: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 enum AutobotProfile {
     Conservative,
     Standard,
     Aggressive,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum EvidenceRedactionProfile {
+    Debug,
+    Audit,
+    Operational,
+    Clinical,
+    Emergency,
+}
+
+impl EvidenceRedactionProfile {
+    fn parse(raw: &str) -> Self {
+        match raw.trim().to_lowercase().as_str() {
+            "audit" => Self::Audit,
+            "operational" => Self::Operational,
+            "clinical" => Self::Clinical,
+            "emergency" => Self::Emergency,
+            _ => Self::Debug,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Audit => "audit",
+            Self::Operational => "operational",
+            Self::Clinical => "clinical",
+            Self::Emergency => "emergency",
+        }
+    }
+
+    fn default_retention_days(self) -> i64 {
+        match self {
+            Self::Debug => 3650,
+            Self::Audit => 1095,
+            Self::Operational => 365,
+            Self::Clinical => 180,
+            Self::Emergency => 90,
+        }
+    }
 }
 
 impl AutobotProfile {
@@ -668,6 +826,22 @@ fn localized_error_message(error: &str) -> Option<String> {
         ),
         "from_required" => tr("Import requires --from.", "import 命令需要提供 --from。"),
         "query_required" => tr("Search requires --query.", "search 命令需要提供 --query。"),
+        "strip_in_place_requires_force" => tr(
+            "In-place stripping requires --force.",
+            "原地清理需要同时传入 --force。",
+        ),
+        "no_source_files_found" => tr(
+            "No source files were found for stripping.",
+            "未找到可清理的源码文件。",
+        ),
+        "strip_sources_no_files" => tr(
+            "No source files were resolved for strip-sources packaging.",
+            "strip-sources 打包未解析到源码文件。",
+        ),
+        "invalid_out_format" => tr(
+            "Invalid strip archive format. Use tar.gz.",
+            "无效的清理归档格式。请使用 tar.gz。",
+        ),
         "template_missing" => tr(
             "The requested template could not be found.",
             "未找到请求的模板。",
@@ -696,12 +870,17 @@ fn localized_action_message(action: &str) -> Option<String> {
         "template_list" => tr("Templates listed.", "模板列表已生成。"),
         "scan" => tr("Anchor scan completed.", "锚点扫描已完成。"),
         "extract_comments" => tr("Comments extracted into LensMap.", "注释已提取到 LensMap。"),
+        "unmerge" => tr("Comments extracted into LensMap.", "注释已提取到 LensMap。"),
         "merge" => tr(
             "LensMap entries merged back into source files.",
             "LensMap 条目已合并回源码文件。",
         ),
         "annotate" => tr("Annotation saved.", "注释已保存。"),
         "package" => tr("LensMap files packaged.", "LensMap 文件已打包。"),
+        "strip" => tr(
+            "LensMap source stripping completed.",
+            "LensMap 源码清理已完成。",
+        ),
         "unpackage" => tr(
             "LensMap files restored from the package bundle.",
             "LensMap 文件已从打包目录恢复。",
@@ -855,6 +1034,216 @@ fn hash_text(raw: &str) -> String {
     hex[..12].to_string()
 }
 
+fn parse_redaction_profile(args: &ParsedArgs, key: &str) -> EvidenceRedactionProfile {
+    args.get(key).map_or(
+        EvidenceRedactionProfile::Debug,
+        EvidenceRedactionProfile::parse,
+    )
+}
+
+fn file_fingerprint(path: &Path) -> Option<String> {
+    let mut hasher = Sha256::new();
+    let content = fs::read(path).ok()?;
+    hasher.update(&content);
+    Some(hex::encode(hasher.finalize())[..12].to_string())
+}
+
+fn file_size(path: &Path) -> Option<u64> {
+    fs::metadata(path).ok().map(|meta| meta.len())
+}
+
+fn make_evidence_artifact(root: &Path, path: &Path, kind: &str) -> Option<EvidenceArtifact> {
+    let rel = normalize_relative(root, path);
+    let bytes = file_size(path)?;
+    let hash = file_fingerprint(path)?;
+    Some(EvidenceArtifact {
+        path: rel,
+        kind: kind.to_string(),
+        hash,
+        bytes,
+    })
+}
+
+fn command_policy_hash(policy: &PolicySettings) -> String {
+    serde_json::to_string(policy)
+        .ok()
+        .map(|raw| hash_text(&raw))
+        .unwrap_or_else(|| "unavailable".to_string())
+}
+
+fn command_fingerprint(
+    command: &str,
+    args: &ParsedArgs,
+    inputs: &[String],
+    outputs: &[String],
+) -> String {
+    let mut raw = String::new();
+    raw.push_str(command);
+    for input in inputs {
+        raw.push_str(input);
+    }
+    for output in outputs {
+        raw.push_str(output);
+    }
+    let mut flag_map: BTreeMap<String, String> = BTreeMap::new();
+    for (key, value) in &args.flags {
+        flag_map.insert(key.clone(), value.clone());
+    }
+    for (key, value) in flag_map {
+        raw.push_str(&key);
+        raw.push('=');
+        raw.push_str(&value);
+        raw.push('|');
+    }
+    hash_text(&raw)
+}
+
+fn apply_redaction(value: &mut Value, profile: EvidenceRedactionProfile) {
+    match profile {
+        EvidenceRedactionProfile::Debug => {}
+        EvidenceRedactionProfile::Audit => redact_json_fields(
+            value,
+            &["author", "review_due_at", "source", "signature", "metadata"],
+        ),
+        EvidenceRedactionProfile::Operational => redact_json_fields(
+            value,
+            &[
+                "author",
+                "review_due_at",
+                "source",
+                "signature",
+                "metadata",
+                "text",
+                "owner",
+            ],
+        ),
+        EvidenceRedactionProfile::Clinical => redact_json_fields(
+            value,
+            &[
+                "author",
+                "review_due_at",
+                "source",
+                "signature",
+                "metadata",
+                "owner",
+                "text",
+                "scope",
+            ],
+        ),
+        EvidenceRedactionProfile::Emergency => {
+            *value = json!({"redacted": "policy_profile_emergency"});
+        }
+    }
+}
+
+fn redact_json_fields(value: &mut Value, keys: &[&str]) {
+    match value {
+        Value::Object(map) => {
+            for key in keys {
+                map.remove(*key);
+            }
+            for item in map.values_mut() {
+                redact_json_fields(item, keys);
+            }
+        }
+        Value::Array(values) => {
+            for item in values {
+                redact_json_fields(item, keys);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn to_evidence_artifacts(root: &Path, outputs: &[&Path], kind: &str) -> Vec<EvidenceArtifact> {
+    outputs
+        .iter()
+        .filter_map(|path| make_evidence_artifact(root, path, kind))
+        .collect()
+}
+
+fn emit_with_envelope(
+    root: &Path,
+    command: &str,
+    action: &str,
+    args: &ParsedArgs,
+    payload: Value,
+    profile: EvidenceRedactionProfile,
+    policy: &PolicySettings,
+    input_refs: &[String],
+    output_paths: &[PathBuf],
+    status_code: i32,
+    errors: Vec<String>,
+) -> ! {
+    let started_at = payload
+        .get("ts")
+        .and_then(Value::as_str)
+        .map(|value| value.to_string())
+        .unwrap_or_else(now_iso);
+    let ts = now_iso();
+    let output_refs = output_paths
+        .iter()
+        .map(|path| normalize_relative(root, path))
+        .collect::<Vec<_>>();
+    let output_artifacts = output_paths
+        .iter()
+        .filter_map(|path| make_evidence_artifact(root, path, action))
+        .collect::<Vec<_>>();
+    let mut out_value = payload;
+    apply_redaction(&mut out_value, profile);
+    let command_profile = if action.is_empty() { "default" } else { action };
+    let receipt = EvidenceEnvelope {
+        doc_type: "lensmap_evidence_envelope".to_string(),
+        version: "1.0.0".to_string(),
+        command_version: COMMAND_VERSION.to_string(),
+        command: command.to_string(),
+        command_profile: command_profile.to_string(),
+        command_identity: action.to_string(),
+        policy_hash: command_policy_hash(policy),
+        execution_fingerprint: command_fingerprint(command, args, input_refs, &output_refs),
+        redaction_profile: profile.label().to_string(),
+        retention_window_days: out_value
+            .get("retention_days")
+            .and_then(Value::as_i64)
+            .unwrap_or_else(|| profile.default_retention_days()),
+        started_at,
+        finished_at: ts.clone(),
+        status: if status_code == 0 { "ok" } else { "failed" }.to_string(),
+        status_code,
+        input_artifacts: input_refs
+            .iter()
+            .map(|path| EvidenceArtifact {
+                path: path.clone(),
+                kind: "input".to_string(),
+                hash: "".to_string(),
+                bytes: 0,
+            })
+            .collect(),
+        output_artifacts,
+        errors,
+    };
+    if let Some(obj) = out_value.as_object_mut() {
+        obj.insert(
+            "receipt".to_string(),
+            serde_json::to_value(receipt).unwrap_or_else(|_| json!({})),
+        );
+    }
+    if let Some(bundle_dir) = out_value
+        .get("bundle_dir")
+        .and_then(Value::as_str)
+        .map(|dir| resolve_from_root(root, dir))
+    {
+        let envelope_path = bundle_dir.join("envelope.json");
+        ensure_dir(&envelope_path);
+        let _ = fs::write(
+            &envelope_path,
+            serde_json::to_string_pretty(&out_value).unwrap_or_else(|_| "{}".to_string()),
+        );
+    }
+    append_history(root, &out_value);
+    emit(out_value, status_code);
+}
+
 fn metadata_string_array(values: &[&str]) -> Value {
     Value::Array(
         values
@@ -877,6 +1266,19 @@ fn default_policy_settings() -> PolicySettings {
 
 fn default_policy_value() -> Value {
     serde_json::to_value(default_policy_settings()).unwrap_or_else(|_| json!({}))
+}
+
+fn default_production_settings() -> ProductionSettings {
+    ProductionSettings {
+        strip_anchors: false,
+        strip_refs: false,
+        strip_on_package: false,
+        exclude_patterns: vec![],
+    }
+}
+
+fn default_production_value() -> Value {
+    serde_json::to_value(default_production_settings()).unwrap_or_else(|_| json!({}))
 }
 
 fn metadata_string(metadata: &Map<String, Value>, key: &str, fallback: &str) -> String {
@@ -916,6 +1318,14 @@ fn policy_for_doc(doc: &LensMapDoc) -> PolicySettings {
         .unwrap_or_else(default_policy_settings)
 }
 
+fn production_for_doc(doc: &LensMapDoc) -> ProductionSettings {
+    doc.metadata
+        .get("production")
+        .cloned()
+        .and_then(|value| serde_json::from_value::<ProductionSettings>(value).ok())
+        .unwrap_or_else(default_production_settings)
+}
+
 fn aggregate_policy_settings<'a, I>(policies: I) -> PolicySettings
 where
     I: IntoIterator<Item = &'a PolicySettings>,
@@ -948,9 +1358,37 @@ where
     aggregated
 }
 
+fn aggregate_production_settings<'a, I>(policies: I) -> ProductionSettings
+where
+    I: IntoIterator<Item = &'a ProductionSettings>,
+{
+    let mut aggregated = ProductionSettings::default();
+    let mut exclude_patterns = BTreeMap::new();
+    for policy in policies {
+        aggregated.strip_anchors |= policy.strip_anchors;
+        aggregated.strip_refs |= policy.strip_refs;
+        aggregated.strip_on_package |= policy.strip_on_package;
+        for pattern in &policy.exclude_patterns {
+            let normalized = pattern.trim();
+            if !normalized.is_empty() {
+                exclude_patterns.insert(normalized.to_string(), true);
+            }
+        }
+    }
+    aggregated.exclude_patterns = exclude_patterns.keys().cloned().collect();
+    aggregated
+}
+
 fn store_policy(metadata: &mut Map<String, Value>, policy: &PolicySettings) {
     metadata.insert(
         "policy".to_string(),
+        serde_json::to_value(policy).unwrap_or_else(|_| json!({})),
+    );
+}
+
+fn store_production_policy(metadata: &mut Map<String, Value>, policy: &ProductionSettings) {
+    metadata.insert(
+        "production".to_string(),
         serde_json::to_value(policy).unwrap_or_else(|_| json!({})),
     );
 }
@@ -1197,6 +1635,9 @@ fn apply_default_metadata(metadata: &mut Map<String, Value>) {
     metadata
         .entry("policy".to_string())
         .or_insert_with(default_policy_value);
+    metadata
+        .entry("production".to_string())
+        .or_insert_with(default_production_value);
 }
 
 fn parse_anchor_placement(raw: &str) -> Option<AnchorPlacement> {
@@ -1364,6 +1805,10 @@ fn make_package_manifest(root: &Path, bundle_dir: &str) -> PackageManifest {
         version: "1.0.0".to_string(),
         root: normalize_relative(root, root),
         bundle_dir: bundle_dir.to_string(),
+        bundle_family: Some("artifact".to_string()),
+        envelope_path: None,
+        redaction_profile: None,
+        retention_days: 0,
         created_at: ts.clone(),
         updated_at: ts,
         items: vec![],
@@ -1386,6 +1831,16 @@ fn normalize_package_manifest(
     }
     if manifest.bundle_dir.trim().is_empty() {
         manifest.bundle_dir = bundle_dir.to_string();
+    }
+    if manifest.bundle_family.as_ref().is_none() {
+        manifest.bundle_family = Some(if manifest.doc_type == "lensmap_evidence_bundle" {
+            "evidence".to_string()
+        } else {
+            "artifact".to_string()
+        });
+    }
+    if manifest.retention_days < 0 {
+        manifest.retention_days = 0;
     }
     if manifest.created_at.trim().is_empty() {
         manifest.created_at = now_iso();
@@ -1413,6 +1868,9 @@ fn save_package_manifest(
     bundle_dir: &str,
 ) {
     manifest.updated_at = now_iso();
+    manifest
+        .items
+        .sort_by(|left, right| left.original_path.cmp(&right.original_path));
     let manifest = normalize_package_manifest(manifest, root, bundle_dir);
     ensure_dir(path);
     let _ = fs::write(
@@ -1600,6 +2058,17 @@ fn git_worktree_changed_files(root: &Path) -> Vec<String> {
         }
     }
     files.keys().cloned().collect()
+}
+
+fn is_release_ref_context() -> bool {
+    let ref_value = env::var("GITHUB_REF")
+        .ok()
+        .or_else(|| env::var("CI_COMMIT_REF_NAME").ok())
+        .unwrap_or_default()
+        .to_lowercase();
+    ref_value.starts_with("refs/tags/v")
+        || ref_value.starts_with("refs/heads/release/")
+        || ref_value.starts_with("release/")
 }
 
 fn parse_diff_hunks(diff: &str) -> Vec<GitHunk> {
@@ -1849,6 +2318,185 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
         }
     }
     dp[p.len()][t.len()]
+}
+
+fn path_matches_patterns(path: &str, patterns: &[String]) -> bool {
+    patterns.iter().any(|pattern| {
+        let normalized = pattern.trim();
+        !normalized.is_empty() && wildcard_match(normalized, path)
+    })
+}
+
+fn collect_source_files_for_strip(
+    root: &Path,
+    sources: &[String],
+    exclude_patterns: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let mut files = BTreeMap::new();
+    let mut missing = vec![];
+    for source in sources {
+        let source = source.trim();
+        if source.is_empty() {
+            continue;
+        }
+        let abs = resolve_from_root(root, source);
+        if !is_within_root(root, &abs) || !abs.exists() {
+            missing.push(source.to_string());
+            continue;
+        }
+        if abs.is_file() {
+            let rel = normalize_relative(root, &abs);
+            if !should_skip_rel(&rel) && !path_matches_patterns(&rel, exclude_patterns) {
+                files.insert(rel, true);
+            }
+            continue;
+        }
+        for entry in WalkDir::new(&abs)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            if !entry.file_type().is_file() {
+                continue;
+            }
+            let file_abs = normalize_path(entry.path());
+            let rel = normalize_relative(root, &file_abs);
+            if should_skip_rel(&rel) || path_matches_patterns(&rel, exclude_patterns) {
+                continue;
+            }
+            files.insert(rel, true);
+        }
+    }
+    (files.keys().cloned().collect(), missing)
+}
+
+fn strip_markers_from_line(
+    line: &str,
+    clean_anchors: bool,
+    clean_refs: bool,
+) -> (String, usize, usize) {
+    let mut current = line.to_string();
+    let mut anchors_removed = 0usize;
+    let mut refs_removed = 0usize;
+
+    if clean_anchors {
+        if let Some(anchor) = parse_anchor_line(&current) {
+            anchors_removed = 1;
+            if anchor.is_inline {
+                if let Some(idx) = find_line_comment_index_outside_strings(&current, &anchor.marker)
+                {
+                    current = current[..idx].trim_end().to_string();
+                } else {
+                    current.clear();
+                }
+            } else {
+                current.clear();
+            }
+        }
+    }
+
+    if clean_refs {
+        let mut removed = false;
+        for marker in ["//", "#"] {
+            if let Some(ref_site) = locate_ref_site(&current, marker) {
+                refs_removed = 1;
+                removed = true;
+                if ref_site.is_inline {
+                    current = ref_site.prefix.trim_end().to_string();
+                } else {
+                    current.clear();
+                }
+                break;
+            }
+        }
+        if !removed {
+            if let Some(ref_match) = parse_ref_in_line(&current) {
+                if let Some(idx) =
+                    find_line_comment_index_outside_strings(&current, &ref_match.marker)
+                {
+                    refs_removed = 1;
+                    let prefix = current[..idx].trim_end().to_string();
+                    current = prefix;
+                }
+            }
+        }
+    }
+
+    (current, anchors_removed, refs_removed)
+}
+
+fn is_supported_source_file(path: &Path) -> bool {
+    let ext = ext_of(path);
+    SUPPORTED_EXTS.contains(&ext.as_str())
+}
+
+fn strip_file_content(
+    content: &str,
+    clean_anchors: bool,
+    clean_refs: bool,
+) -> (String, usize, usize, bool) {
+    let lines = split_lines(content);
+    let mut out = Vec::with_capacity(lines.len());
+    let mut anchors_removed = 0usize;
+    let mut refs_removed = 0usize;
+    let mut changed = false;
+    for line in lines {
+        let (stripped, anchors, refs) = strip_markers_from_line(&line, clean_anchors, clean_refs);
+        if anchors > 0 || refs > 0 {
+            changed = true;
+        }
+        anchors_removed += anchors;
+        refs_removed += refs;
+        out.push(stripped);
+    }
+    (join_lines(&out), anchors_removed, refs_removed, changed)
+}
+
+fn to_archive_rel(path: &Path) -> String {
+    let mut parts = vec![];
+    for component in path.components() {
+        if let Component::Normal(part) = component {
+            parts.push(part.to_string_lossy().to_string());
+        }
+    }
+    parts.join("/")
+}
+
+fn build_deterministic_tar_gz(src_dir: &Path, out_path: &Path) -> Result<usize, String> {
+    let mut paths = vec![];
+    for entry in WalkDir::new(src_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(Result::ok)
+    {
+        if entry.file_type().is_file() {
+            paths.push(normalize_path(entry.path()));
+        }
+    }
+    paths.sort();
+    ensure_dir(out_path);
+    let file = fs::File::create(out_path).map_err(|error| error.to_string())?;
+    let encoder = GzEncoder::new(file, Compression::default());
+    let mut builder = Builder::new(encoder);
+    for path in &paths {
+        let rel = path
+            .strip_prefix(src_dir)
+            .map_err(|error| error.to_string())?;
+        let rel = to_archive_rel(rel);
+        let bytes = fs::read(path).map_err(|error| error.to_string())?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(0);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, rel, bytes.as_slice())
+            .map_err(|error| error.to_string())?;
+    }
+    builder.finish().map_err(|error| error.to_string())?;
+    Ok(paths.len())
 }
 
 fn collect_supported_files(root: &Path, start: &Path, out: &mut BTreeMap<String, bool>) {
@@ -4322,6 +4970,17 @@ fn cmd_scan(root: &Path, args: &ParsedArgs) {
 
 fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
     let dry_run = args.has("dry-run");
+    let strip_requested = bool_from_flag(args, "strip", args.has("strip"));
+    let action_name = if args
+        .positional
+        .first()
+        .map(|value| value.eq_ignore_ascii_case("unmerge"))
+        .unwrap_or(false)
+    {
+        "unmerge"
+    } else {
+        "extract_comments"
+    };
     let lensmap_path = resolve_lensmap_path(root, args, None);
     let mut doc = load_doc(&lensmap_path, "group");
     let covers = normalize_covers(args, &doc, &[]);
@@ -4330,7 +4989,7 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
     if files.is_empty() {
         if !lensmap_path.exists() && covers.is_empty() {
             emit(
-                lensmap_missing_payload(root, "extract_comments", &lensmap_path, args),
+                lensmap_missing_payload(root, action_name, &lensmap_path, args),
                 1,
             );
         }
@@ -4338,7 +4997,7 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
             json!({
                 "ok": false,
                 "type": "lensmap",
-                "action": "extract_comments",
+                "action": action_name,
                 "error": "no_files_resolved",
                 "covers": covers,
                 "hint": tr(
@@ -4471,11 +5130,61 @@ fn cmd_extract_comments(root: &Path, args: &ParsedArgs) {
         save_doc(&lensmap_path, doc.clone());
     }
 
+    let mut strip_details = None::<Value>;
+    if strip_requested {
+        let clean_anchors = bool_from_flag(args, "clean-anchors", true);
+        let clean_refs = bool_from_flag(args, "clean-refs", true);
+        let mut strip_summary = StripSummary::default();
+        let mut marker_files = vec![];
+        let mut changed_files = vec![];
+
+        for rel in &files {
+            let abs = resolve_from_root(root, rel);
+            if !abs.exists() || !is_supported_source_file(&abs) {
+                continue;
+            }
+            strip_summary.files_scanned += 1;
+            let original_content = fs::read_to_string(&abs).unwrap_or_default();
+            let (stripped, anchors_removed, refs_removed, changed) =
+                strip_file_content(&original_content, clean_anchors, clean_refs);
+            strip_summary.anchors_removed += anchors_removed;
+            strip_summary.refs_removed += refs_removed;
+            if anchors_removed + refs_removed > 0 {
+                strip_summary.marker_hits += 1;
+                marker_files.push(rel.clone());
+            }
+            if changed {
+                strip_summary.files_changed += 1;
+                changed_files.push(rel.clone());
+            }
+            if changed && !dry_run {
+                let _ = fs::write(&abs, stripped);
+            }
+        }
+
+        strip_details = Some(json!({
+            "enabled": true,
+            "clean_anchors": clean_anchors,
+            "clean_refs": clean_refs,
+            "summary": {
+                "files_scanned": strip_summary.files_scanned,
+                "files_changed": strip_summary.files_changed,
+                "anchors_removed": strip_summary.anchors_removed,
+                "refs_removed": strip_summary.refs_removed,
+                "marker_hits": strip_summary.marker_hits,
+            },
+            "marker_files": marker_files,
+            "changed_files": changed_files,
+        }));
+    }
+
     let out = json!({
         "ok": true,
         "type": "lensmap",
-        "action": "extract_comments",
+        "action": action_name,
         "dry_run": dry_run,
+        "strip_requested": strip_requested,
+        "strip": strip_details,
         "lensmap": normalize_relative(root, &lensmap_path),
         "files_scanned": files.len(),
         "entries_added": new_entries.len(),
@@ -5076,6 +5785,387 @@ fn apply_dir_maps(original_rel: &str, maps: &[(String, String)]) -> Option<Strin
     None
 }
 
+fn cmd_strip(root: &Path, args: &ParsedArgs) {
+    let in_place = args.has("in-place");
+    let force = args.has("force");
+    let check_only = args.has("check");
+    let dry_run = args.has("dry-run");
+    if in_place && !force {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "strip",
+                "error": "strip_in_place_requires_force",
+                "hint": tr(
+                    "Use --in-place with --force to acknowledge source mutation.",
+                    "使用 --in-place 时必须同时传入 --force 以确认会修改源码。",
+                ),
+            }),
+            1,
+        );
+    }
+
+    let lensmap_path = resolve_lensmap_path(root, args, None);
+    let mut production = default_production_settings();
+    let mut sources = split_csv(args.get("source"));
+    if lensmap_path.exists() {
+        let doc = load_doc(&lensmap_path, "group");
+        production = production_for_doc(&doc);
+        if sources.is_empty() && !doc.covers.is_empty() {
+            sources = doc.covers.clone();
+        }
+    }
+    if sources.is_empty() {
+        sources.push(".".to_string());
+    }
+
+    let mut exclude_patterns = if let Some(raw) = args
+        .get("exclude-patterns")
+        .or_else(|| args.get("exclude-pattern"))
+    {
+        split_csv(Some(raw))
+    } else {
+        production.exclude_patterns.clone()
+    };
+    exclude_patterns.sort();
+    exclude_patterns.dedup();
+
+    let clean_anchors = bool_from_flag(
+        args,
+        "clean-anchors",
+        if production.strip_anchors || production.strip_refs {
+            production.strip_anchors
+        } else {
+            true
+        },
+    );
+    let clean_refs = bool_from_flag(
+        args,
+        "clean-refs",
+        if production.strip_anchors || production.strip_refs {
+            production.strip_refs
+        } else {
+            true
+        },
+    );
+    let out_dir = args.get("out-dir").unwrap_or("dist/prod");
+    let out_root = resolve_from_root(root, out_dir);
+    if !in_place && !is_within_root(root, &out_root) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "strip",
+                "error": "security_output_outside_root",
+                "out_dir": out_dir,
+            }),
+            1,
+        );
+    }
+
+    let (files, missing_sources) =
+        collect_source_files_for_strip(root, &sources, &exclude_patterns);
+    if files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "strip",
+                "error": "no_source_files_found",
+                "sources": sources,
+                "missing_sources": missing_sources,
+            }),
+            1,
+        );
+    }
+    if !in_place && !check_only && !dry_run && out_root.exists() {
+        let _ = fs::remove_dir_all(&out_root);
+    }
+
+    let mut summary = StripSummary::default();
+    let mut marker_files = vec![];
+    let mut file_summaries = vec![];
+
+    for rel in &files {
+        let abs = resolve_from_root(root, rel);
+        if !abs.exists() {
+            continue;
+        }
+        summary.files_scanned += 1;
+        let is_supported = is_supported_source_file(&abs);
+
+        if is_supported {
+            let original_content = fs::read_to_string(&abs).unwrap_or_default();
+            let (stripped, anchors_removed, refs_removed, changed) =
+                strip_file_content(&original_content, clean_anchors, clean_refs);
+            summary.anchors_removed += anchors_removed;
+            summary.refs_removed += refs_removed;
+            if anchors_removed + refs_removed > 0 {
+                summary.marker_hits += 1;
+                marker_files.push(rel.clone());
+            }
+            if changed {
+                summary.files_changed += 1;
+            }
+
+            if !check_only && !dry_run {
+                if in_place {
+                    if changed {
+                        let _ = fs::write(&abs, stripped);
+                    }
+                } else {
+                    let out_path = out_root.join(rel);
+                    ensure_dir(&out_path);
+                    if changed {
+                        let _ = fs::write(&out_path, stripped);
+                    } else {
+                        let _ = fs::copy(&abs, &out_path);
+                    }
+                }
+            }
+
+            file_summaries.push(json!({
+                "file": rel,
+                "supported": true,
+                "anchors_removed": anchors_removed,
+                "refs_removed": refs_removed,
+                "changed": changed,
+            }));
+            continue;
+        }
+
+        if !in_place && !check_only && !dry_run {
+            let out_path = out_root.join(rel);
+            ensure_dir(&out_path);
+            let _ = fs::copy(&abs, &out_path);
+        }
+
+        file_summaries.push(json!({
+            "file": rel,
+            "supported": false,
+            "anchors_removed": 0,
+            "refs_removed": 0,
+            "changed": false,
+        }));
+    }
+
+    let out = json!({
+        "ok": !(check_only && summary.marker_hits > 0),
+        "type": "lensmap",
+        "action": "strip",
+        "command_version": COMMAND_VERSION,
+        "check_only": check_only,
+        "in_place": in_place,
+        "dry_run": dry_run,
+        "force": force,
+        "sources": sources,
+        "missing_sources": missing_sources,
+        "exclude_patterns": exclude_patterns,
+        "out_dir": if in_place { None::<String> } else { Some(normalize_relative(root, &out_root)) },
+        "clean_anchors": clean_anchors,
+        "clean_refs": clean_refs,
+        "summary": {
+            "files_scanned": summary.files_scanned,
+            "files_changed": summary.files_changed,
+            "anchors_removed": summary.anchors_removed,
+            "refs_removed": summary.refs_removed,
+            "marker_hits": summary.marker_hits,
+        },
+        "marker_files": marker_files,
+        "files": file_summaries,
+        "ts": now_iso(),
+    });
+    append_history(root, &out);
+    emit(
+        out,
+        if check_only && summary.marker_hits > 0 {
+            1
+        } else {
+            0
+        },
+    );
+}
+
+fn package_stripped_sources(
+    root: &Path,
+    args: &ParsedArgs,
+    bundle_abs: &Path,
+    dry_run: bool,
+    source_hints: &[String],
+    production: &ProductionSettings,
+) -> Option<Value> {
+    if !args.has("strip-sources") && !args.has("production") && !production.strip_on_package {
+        return None;
+    }
+
+    let out_format = args
+        .get("out-format")
+        .unwrap_or("tar.gz")
+        .trim()
+        .to_lowercase();
+    if out_format != "tar.gz" {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package",
+                "error": "invalid_out_format",
+                "out_format": out_format,
+                "allowed": ["tar.gz"],
+            }),
+            1,
+        );
+    }
+
+    let mut sources = split_csv(args.get("source"));
+    if sources.is_empty() {
+        sources = source_hints.to_vec();
+    }
+    if sources.is_empty() {
+        sources.push(".".to_string());
+    }
+
+    let mut exclude_patterns = if let Some(raw) = args
+        .get("strip-exclude-patterns")
+        .or_else(|| args.get("exclude-patterns"))
+    {
+        split_csv(Some(raw))
+    } else {
+        production.exclude_patterns.clone()
+    };
+    exclude_patterns.sort();
+    exclude_patterns.dedup();
+
+    let clean_anchors = bool_from_flag(
+        args,
+        "clean-anchors",
+        if args.has("strip-sources") || args.has("production") {
+            true
+        } else {
+            production.strip_anchors
+        },
+    );
+    let clean_refs = bool_from_flag(
+        args,
+        "clean-refs",
+        if args.has("strip-sources") || args.has("production") {
+            true
+        } else {
+            production.strip_refs
+        },
+    );
+    let (files, missing_sources) =
+        collect_source_files_for_strip(root, &sources, &exclude_patterns);
+    if files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package",
+                "error": "strip_sources_no_files",
+                "sources": sources,
+                "missing_sources": missing_sources,
+            }),
+            1,
+        );
+    }
+
+    let stage_dir = bundle_abs.join("prod-sources");
+    let archive_path = bundle_abs.join("prod-sources.tar.gz");
+    if !is_within_root(root, &stage_dir) || !is_within_root(root, &archive_path) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package",
+                "error": "security_output_outside_root",
+            }),
+            1,
+        );
+    }
+    if !dry_run && stage_dir.exists() {
+        let _ = fs::remove_dir_all(&stage_dir);
+    }
+
+    let mut summary = StripSummary::default();
+    let mut marker_files = vec![];
+    for rel in &files {
+        let abs = resolve_from_root(root, rel);
+        if !abs.exists() {
+            continue;
+        }
+        summary.files_scanned += 1;
+        if is_supported_source_file(&abs) {
+            let original_content = fs::read_to_string(&abs).unwrap_or_default();
+            let (stripped, anchors_removed, refs_removed, changed) =
+                strip_file_content(&original_content, clean_anchors, clean_refs);
+            summary.anchors_removed += anchors_removed;
+            summary.refs_removed += refs_removed;
+            if anchors_removed + refs_removed > 0 {
+                summary.marker_hits += 1;
+                marker_files.push(rel.clone());
+            }
+            if changed {
+                summary.files_changed += 1;
+            }
+            if !dry_run {
+                let out_path = stage_dir.join(rel);
+                ensure_dir(&out_path);
+                if changed {
+                    let _ = fs::write(&out_path, stripped);
+                } else {
+                    let _ = fs::copy(&abs, &out_path);
+                }
+            }
+            continue;
+        }
+        if !dry_run {
+            let out_path = stage_dir.join(rel);
+            ensure_dir(&out_path);
+            let _ = fs::copy(&abs, &out_path);
+        }
+    }
+
+    let archived_files = if dry_run {
+        0usize
+    } else {
+        build_deterministic_tar_gz(&stage_dir, &archive_path).unwrap_or_else(|error| {
+            emit(
+                json!({
+                    "ok": false,
+                    "type": "lensmap",
+                    "action": "package",
+                    "error": "strip_archive_failed",
+                    "message": error,
+                }),
+                1,
+            );
+        })
+    };
+
+    Some(json!({
+        "enabled": true,
+        "out_format": out_format,
+        "sources": sources,
+        "missing_sources": missing_sources,
+        "exclude_patterns": exclude_patterns,
+        "stage_dir": normalize_relative(root, &stage_dir),
+        "archive": normalize_relative(root, &archive_path),
+        "clean_anchors": clean_anchors,
+        "clean_refs": clean_refs,
+        "summary": {
+            "files_scanned": summary.files_scanned,
+            "files_changed": summary.files_changed,
+            "anchors_removed": summary.anchors_removed,
+            "refs_removed": summary.refs_removed,
+            "marker_hits": summary.marker_hits,
+            "archived_files": archived_files,
+        },
+        "marker_files": marker_files,
+    }))
+}
+
 fn cmd_package(root: &Path, args: &ParsedArgs) {
     let dry_run = args.has("dry-run");
     let bundle_dir = args
@@ -5145,6 +6235,24 @@ fn cmd_package(root: &Path, args: &ParsedArgs) {
             1,
         );
     }
+    let package_lensmaps = candidate_files.clone();
+    let loaded_docs = load_repo_lensmap_docs(root, &package_lensmaps);
+    let production = aggregate_production_settings(
+        loaded_docs
+            .iter()
+            .map(|loaded| production_for_doc(&loaded.doc))
+            .collect::<Vec<_>>()
+            .iter(),
+    );
+    let mut source_hints = BTreeMap::new();
+    for loaded in &loaded_docs {
+        for cover in &loaded.doc.covers {
+            let normalized = cover.trim();
+            if !normalized.is_empty() {
+                source_hints.insert(normalized.to_string(), true);
+            }
+        }
+    }
 
     let files_dir = bundle_abs.join("files");
     let manifest_path = bundle_abs.join("manifest.json");
@@ -5196,6 +6304,14 @@ fn cmd_package(root: &Path, args: &ParsedArgs) {
             packaged_count += 1;
         }
 
+        let source_hash = file_fingerprint(&abs);
+        let packaged_hash = if dry_run {
+            None
+        } else {
+            file_fingerprint(&packaged_abs)
+        };
+        let bytes = fs::metadata(&abs).ok().map(|m| m.len());
+
         let item = PackageItem {
             id: id.clone(),
             original_path: rel.clone(),
@@ -5208,6 +6324,9 @@ fn cmd_package(root: &Path, args: &ParsedArgs) {
             resolved_path: None,
             last_error: err.clone(),
             updated_at: Some(now_iso()),
+            source_hash,
+            packaged_hash,
+            bytes,
         };
 
         if let Some(idx) = by_original.get(&rel).copied() {
@@ -5229,6 +6348,14 @@ fn cmd_package(root: &Path, args: &ParsedArgs) {
         let _ = fs::create_dir_all(&files_dir);
         save_package_manifest(&manifest_path, manifest.clone(), root, &bundle_dir);
     }
+    let strip_sources = package_stripped_sources(
+        root,
+        args,
+        &bundle_abs,
+        dry_run,
+        &source_hints.keys().cloned().collect::<Vec<_>>(),
+        &production,
+    );
 
     let out = json!({
         "ok": true,
@@ -5240,11 +6367,384 @@ fn cmd_package(root: &Path, args: &ParsedArgs) {
         "manifest": normalize_relative(root, &manifest_path),
         "packaged_count": packaged_count,
         "skipped": skipped,
+        "strip_sources": strip_sources,
         "ts": now_iso(),
         "files": file_summaries,
     });
     append_history(root, &out);
     emit(out, 0);
+}
+
+fn cmd_package_evidence(root: &Path, args: &ParsedArgs) {
+    let dry_run = args.has("dry-run");
+    let bundle_dir = args
+        .get("bundle-dir")
+        .unwrap_or(".lenspack")
+        .trim()
+        .to_string();
+    let bundle_dir = if bundle_dir.is_empty() {
+        ".lenspack".to_string()
+    } else {
+        bundle_dir
+    };
+    let compression_mode = args
+        .get("compression-mode")
+        .unwrap_or("copy")
+        .trim()
+        .to_lowercase();
+    if !["copy", "none"].contains(&compression_mode.as_str()) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package_evidence",
+                "error": "invalid_compression_mode",
+                "compression_mode": compression_mode,
+                "allowed": ["copy", "none"],
+            }),
+            1,
+        );
+    }
+    let keep_source = true; // evidence packaging is copy-only
+    let profile = parse_redaction_profile(args, "redaction-profile");
+    let retention_days = args
+        .get("retention-days")
+        .and_then(|raw| raw.parse::<i64>().ok())
+        .unwrap_or_else(|| profile.default_retention_days())
+        .max(0);
+
+    let bundle_abs = resolve_from_root(root, &bundle_dir);
+    if !is_within_root(root, &bundle_abs) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package_evidence",
+                "error": "security_bundle_outside_root",
+                "bundle_dir": bundle_dir,
+            }),
+            1,
+        );
+    }
+
+    let mut candidate_files = split_csv(args.get("lensmaps"));
+    if candidate_files.is_empty() {
+        if let Some(single) = args.get("lensmap") {
+            candidate_files.push(single.to_string());
+        }
+    }
+    if candidate_files.is_empty() {
+        candidate_files = discover_lensmap_files(root, &bundle_dir);
+    }
+
+    // Optional evidence inclusions
+    if args.has("include-metrics") {
+        let path = default_metric_output_path(root);
+        if path.exists() {
+            candidate_files.push(normalize_relative(root, &path));
+        }
+    }
+    if args.has("include-scorecard") {
+        let path = default_scorecard_output_path(root);
+        if path.exists() {
+            candidate_files.push(normalize_relative(root, &path));
+        }
+    }
+    if args.has("include-pr-report") {
+        let path = default_pr_report_output_path(root);
+        if path.exists() {
+            candidate_files.push(normalize_relative(root, &path));
+        }
+    }
+    if args.has("include-policy") {
+        let path = default_policy_output_path(root);
+        if path.exists() {
+            candidate_files.push(normalize_relative(root, &path));
+        }
+    }
+
+    if candidate_files.is_empty() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "package_evidence",
+                "error": "no_input_files_found",
+                "hint": tr(
+                    "Create lensmaps or run metrics/scorecard first.",
+                    "请先生成 lensmap 或运行 metrics/scorecard。",
+                ),
+            }),
+            1,
+        );
+    }
+    let evidence_lensmaps = candidate_files
+        .iter()
+        .map(|raw| resolve_from_root(root, raw))
+        .filter(|path| is_within_root(root, path) && path.exists() && is_lensmap_filename(path))
+        .map(|path| normalize_relative(root, &path))
+        .collect::<Vec<_>>();
+    let evidence_docs = load_repo_lensmap_docs(root, &evidence_lensmaps);
+    let production = aggregate_production_settings(
+        evidence_docs
+            .iter()
+            .map(|loaded| production_for_doc(&loaded.doc))
+            .collect::<Vec<_>>()
+            .iter(),
+    );
+    let mut source_hints = BTreeMap::new();
+    for loaded in &evidence_docs {
+        for cover in &loaded.doc.covers {
+            let normalized = cover.trim();
+            if !normalized.is_empty() {
+                source_hints.insert(normalized.to_string(), true);
+            }
+        }
+    }
+
+    let files_dir = bundle_abs.join("files");
+    let manifest_path = bundle_abs.join("manifest.json");
+    let mut manifest = load_package_manifest(&manifest_path, root, &bundle_dir);
+    manifest.doc_type = "lensmap_evidence_bundle".to_string();
+    manifest.bundle_family = Some("evidence".to_string());
+    manifest.redaction_profile = Some(profile.label().to_string());
+    manifest.retention_days = retention_days;
+    manifest.envelope_path = Some("envelope.json".to_string());
+
+    let mut by_original = HashMap::new();
+    for (idx, item) in manifest.items.iter().enumerate() {
+        by_original.insert(item.original_path.clone(), idx);
+    }
+
+    let mut packaged_count = 0usize;
+    let mut skipped = vec![];
+    let mut file_summaries = vec![];
+
+    for raw in candidate_files {
+        let abs = resolve_from_root(root, &raw);
+        if !is_within_root(root, &abs) {
+            skipped.push(format!("security_outside_root:{}", raw));
+            continue;
+        }
+        if !abs.exists() {
+            skipped.push(format!("missing:{}", raw));
+            continue;
+        }
+        if abs.starts_with(&bundle_abs) {
+            skipped.push(format!("inside_bundle:{}", raw));
+            continue;
+        }
+
+        let rel = normalize_relative(root, &abs);
+        let id = hash_text(&rel).to_uppercase();
+        let ext = Path::new(&rel)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("dat");
+        let packaged_rel = format!("files/{}.{}", id, ext);
+        let packaged_abs = files_dir.join(format!("{}.{}", id, ext));
+
+        let mut status = "packaged".to_string();
+        let mut err: Option<String> = None;
+        if !dry_run {
+            if let Err(e) = copy_or_move_file(&abs, &packaged_abs, keep_source) {
+                status = "error".to_string();
+                err = Some(e);
+            }
+        }
+
+        if status == "packaged" {
+            packaged_count += 1;
+        }
+
+        let source_hash = file_fingerprint(&abs);
+        let packaged_hash = if dry_run {
+            None
+        } else {
+            file_fingerprint(&packaged_abs)
+        };
+        let bytes = fs::metadata(&abs).ok().map(|m| m.len());
+
+        let item = PackageItem {
+            id: id.clone(),
+            original_path: rel.clone(),
+            packaged_path: packaged_rel.clone(),
+            status: status.clone(),
+            resolved_path: None,
+            last_error: err.clone(),
+            updated_at: Some(now_iso()),
+            source_hash,
+            packaged_hash,
+            bytes,
+        };
+
+        if let Some(idx) = by_original.get(&rel).copied() {
+            manifest.items[idx] = item;
+        } else {
+            by_original.insert(rel.clone(), manifest.items.len());
+            manifest.items.push(item);
+        }
+
+        file_summaries.push(json!({
+            "file": rel,
+            "packaged_as": packaged_rel,
+            "status": status,
+            "error": err,
+        }));
+    }
+
+    if !dry_run {
+        let _ = fs::create_dir_all(&files_dir);
+        save_package_manifest(&manifest_path, manifest.clone(), root, &bundle_dir);
+    }
+    let strip_sources = package_stripped_sources(
+        root,
+        args,
+        &bundle_abs,
+        dry_run,
+        &source_hints.keys().cloned().collect::<Vec<_>>(),
+        &production,
+    );
+
+    let out = json!({
+        "ok": true,
+        "type": "lensmap",
+        "action": "package_evidence",
+        "bundle_dir": normalize_relative(root, &bundle_abs),
+        "manifest": normalize_relative(root, &manifest_path),
+        "packaged_count": packaged_count,
+        "retention_days": retention_days,
+        "redaction_profile": profile.label(),
+        "compression_mode": compression_mode,
+        "strip_sources": strip_sources,
+        "skipped": skipped,
+        "ts": now_iso(),
+        "files": file_summaries,
+    });
+
+    emit_with_envelope(
+        root,
+        "lensmap",
+        "package_evidence",
+        args,
+        out,
+        profile,
+        &default_policy_settings(),
+        &[],
+        &[manifest_path],
+        0,
+        vec![],
+    );
+}
+
+fn cmd_verify(root: &Path, args: &ParsedArgs) {
+    let bundle_dir = args
+        .get("bundle-dir")
+        .unwrap_or(".lenspack")
+        .trim()
+        .to_string();
+    let bundle_dir = if bundle_dir.is_empty() {
+        ".lenspack".to_string()
+    } else {
+        bundle_dir
+    };
+    let bundle_abs = resolve_from_root(root, &bundle_dir);
+    if !is_within_root(root, &bundle_abs) {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "verify",
+                "error": "security_bundle_outside_root",
+                "bundle_dir": bundle_dir,
+            }),
+            1,
+        );
+    }
+    let manifest_path = bundle_abs.join("manifest.json");
+    if !manifest_path.exists() {
+        emit(
+            json!({
+                "ok": false,
+                "type": "lensmap",
+                "action": "verify",
+                "error": "manifest_missing",
+                "manifest": normalize_relative(root, &manifest_path),
+            }),
+            1,
+        );
+    }
+    let mut manifest = load_package_manifest(&manifest_path, root, &bundle_dir);
+    manifest = normalize_package_manifest(manifest, root, &bundle_dir);
+
+    let mut errors = vec![];
+    if let Some(envelope_rel) = manifest.envelope_path.clone() {
+        let envelope_abs = bundle_abs.join(envelope_rel);
+        if !envelope_abs.exists() {
+            errors.push("envelope_missing".to_string());
+        }
+    }
+    let mut verified = 0usize;
+    for item in &manifest.items {
+        let packaged_abs = bundle_abs.join(&item.packaged_path);
+        if !packaged_abs.exists() {
+            errors.push(format!("missing_packaged:{}", item.packaged_path));
+            continue;
+        }
+        if let Some(expected) = &item.packaged_hash {
+            if let Some(actual) = file_fingerprint(&packaged_abs) {
+                if &actual != expected {
+                    errors.push(format!(
+                        "hash_mismatch:{} expected={} actual={}",
+                        item.packaged_path, expected, actual
+                    ));
+                    continue;
+                }
+            }
+        }
+        if let Some(original) = &item.source_hash {
+            let original_abs = resolve_from_root(root, &item.original_path);
+            if original_abs.exists() {
+                if let Some(actual) = file_fingerprint(&original_abs) {
+                    if &actual != original {
+                        errors.push(format!(
+                            "source_hash_mismatch:{} expected={} actual={}",
+                            item.original_path, original, actual
+                        ));
+                        continue;
+                    }
+                }
+            }
+        }
+        verified += 1;
+    }
+
+    let ok = errors.is_empty();
+    let out = json!({
+        "ok": ok,
+        "type": "lensmap",
+        "action": "verify",
+        "bundle_dir": normalize_relative(root, &bundle_abs),
+        "manifest": normalize_relative(root, &manifest_path),
+        "verified": verified,
+        "items": manifest.items.len(),
+        "errors": errors,
+        "ts": now_iso(),
+    });
+
+    emit_with_envelope(
+        root,
+        "lensmap",
+        "verify",
+        args,
+        out,
+        parse_redaction_profile(args, "redaction-profile"),
+        &default_policy_settings(),
+        &[],
+        &[manifest_path],
+        if ok { 0 } else { 1 },
+        vec![],
+    );
 }
 
 fn cmd_unpackage(root: &Path, args: &ParsedArgs) {
@@ -6082,6 +7582,47 @@ fn collect_aggregated_policy_findings(
     (aggregated_policy, errors, warnings, policy_sources)
 }
 
+fn collect_production_marker_hits(
+    root: &Path,
+    docs: &[LoadedLensMapDoc],
+    production: &ProductionSettings,
+) -> Vec<String> {
+    if !production.strip_anchors && !production.strip_refs {
+        return vec![];
+    }
+    let mut candidate_files = BTreeMap::new();
+    for loaded in docs {
+        for file in resolve_covers_to_files(root, &loaded.doc.covers) {
+            if !path_matches_patterns(&file, &production.exclude_patterns) {
+                candidate_files.insert(file, true);
+            }
+        }
+    }
+
+    let mut hits = vec![];
+    for rel in candidate_files.keys() {
+        let abs = resolve_from_root(root, rel);
+        if !is_within_root(root, &abs) || !abs.exists() || !is_supported_source_file(&abs) {
+            continue;
+        }
+        let content = fs::read_to_string(&abs).unwrap_or_default();
+        let lines = split_lines(&content);
+        let mut has_marker = false;
+        for line in lines {
+            let (_stripped, anchors_removed, refs_removed) =
+                strip_markers_from_line(&line, production.strip_anchors, production.strip_refs);
+            if anchors_removed + refs_removed > 0 {
+                has_marker = true;
+                break;
+            }
+        }
+        if has_marker {
+            hits.push(rel.clone());
+        }
+    }
+    hits
+}
+
 fn summary_stats(entries: &[SearchEntryRecord], stale_after_days: i64) -> SummaryStats {
     let mut stats = SummaryStats {
         entry_count: entries.len(),
@@ -6215,6 +7756,10 @@ fn render_policy_markdown(payload: &Value) -> String {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let production_policy = payload
+        .get("production_policy")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
     let findings = payload
         .get("findings")
         .cloned()
@@ -6318,6 +7863,39 @@ fn render_policy_markdown(payload: &Value) -> String {
             }
         }
     }
+    lines.push(String::new());
+
+    lines.push("## Production".to_string());
+    lines.push(format!(
+        "- strip_anchors: {}",
+        production_policy
+            .get("stripAnchors")
+            .or_else(|| production_policy.get("strip_anchors"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    ));
+    lines.push(format!(
+        "- strip_refs: {}",
+        production_policy
+            .get("stripRefs")
+            .or_else(|| production_policy.get("strip_refs"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    ));
+    lines.push(format!(
+        "- strip_on_package: {}",
+        production_policy
+            .get("stripOnPackage")
+            .or_else(|| production_policy.get("strip_on_package"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    ));
+    let production_markers = payload
+        .get("production_marker_files")
+        .and_then(Value::as_array)
+        .map(|items| items.len())
+        .unwrap_or(0);
+    lines.push(format!("- marker_files: {}", production_markers));
     lines.push(String::new());
 
     lines.push("## Policy Sources".to_string());
@@ -6574,6 +8152,7 @@ fn cmd_policy_init(root: &Path, args: &ParsedArgs) {
 
     let mut doc = load_doc(&lensmap_path, "group");
     let mut policy = policy_for_doc(&doc);
+    let mut production = production_for_doc(&doc);
     policy.require_owner = bool_from_flag(args, "require-owner", policy.require_owner);
     policy.require_author = bool_from_flag(args, "require-author", policy.require_author);
     policy.require_template = bool_from_flag(args, "require-template", policy.require_template);
@@ -6588,7 +8167,22 @@ fn cmd_policy_init(root: &Path, args: &ParsedArgs) {
     {
         policy.required_patterns = split_csv(Some(raw));
     }
+    production.strip_anchors =
+        bool_from_flag(args, "production-strip-anchors", production.strip_anchors);
+    production.strip_refs = bool_from_flag(args, "production-strip-refs", production.strip_refs);
+    production.strip_on_package = bool_from_flag(
+        args,
+        "production-strip-on-package",
+        production.strip_on_package,
+    );
+    if let Some(raw) = args
+        .get("production-exclude-patterns")
+        .or_else(|| args.get("production-exclude-pattern"))
+    {
+        production.exclude_patterns = split_csv(Some(raw));
+    }
     store_policy(&mut doc.metadata, &policy);
+    store_production_policy(&mut doc.metadata, &production);
     save_doc(&lensmap_path, doc.clone());
 
     let out = json!({
@@ -6597,6 +8191,7 @@ fn cmd_policy_init(root: &Path, args: &ParsedArgs) {
         "action": "policy_init",
         "lensmap": normalize_relative(root, &lensmap_path),
         "policy": policy,
+        "production": production,
         "ts": now_iso(),
     });
     append_history(root, &out);
@@ -6640,8 +8235,53 @@ fn cmd_policy_check(root: &Path, args: &ParsedArgs) {
         }));
     }
 
-    let (policy, errors, warnings, policy_sources) =
+    let (policy, mut errors, mut warnings, policy_sources) =
         collect_aggregated_policy_findings(root, &docs);
+    let production_policy = aggregate_production_settings(
+        docs.iter()
+            .map(|loaded| production_for_doc(&loaded.doc))
+            .collect::<Vec<_>>()
+            .iter(),
+    );
+    let production_marker_hits = collect_production_marker_hits(root, &docs, &production_policy);
+    let production_enforced = args.has("production") || is_release_ref_context();
+    if !production_marker_hits.is_empty() {
+        let preview = production_marker_hits
+            .iter()
+            .take(3)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let finding = PolicyFinding {
+            level: if production_enforced {
+                "error".to_string()
+            } else {
+                "warning".to_string()
+            },
+            ref_id: "policy:production".to_string(),
+            lensmap: None,
+            field: "production".to_string(),
+            code: if production_enforced {
+                "production_strip_required".to_string()
+            } else {
+                "production_strip_pending".to_string()
+            },
+            message: format!(
+                "Production strip policy found remaining markers in source files: {}{}",
+                preview,
+                if production_marker_hits.len() > 3 {
+                    ", ..."
+                } else {
+                    ""
+                }
+            ),
+        };
+        if production_enforced {
+            errors.push(finding);
+        } else {
+            warnings.push(finding);
+        }
+    }
     let output_path = args.get("out").map(|out| resolve_from_root(root, out));
     if let Some(output_path) = output_path.as_ref() {
         if !is_within_root(root, output_path) {
@@ -6664,6 +8304,9 @@ fn cmd_policy_check(root: &Path, args: &ParsedArgs) {
         "lensmaps": lensmaps,
         "aggregation": "strictest_union",
         "policy": policy,
+        "production_policy": production_policy,
+        "production_enforced": production_enforced,
+        "production_marker_files": production_marker_hits,
         "policy_sources": policy_sources,
         "findings": {
             "errors": errors,
@@ -6702,8 +8345,24 @@ fn cmd_policy_check(root: &Path, args: &ParsedArgs) {
             );
         }
     }
-    append_history(root, &out);
-    emit(out, if ok || report_only { 0 } else { 1 });
+    let profile = parse_redaction_profile(args, "redaction-profile");
+    let output_paths: Vec<PathBuf> = output_path
+        .as_ref()
+        .map(|p| vec![p.clone()])
+        .unwrap_or_default();
+    emit_with_envelope(
+        root,
+        "lensmap",
+        "policy_check",
+        args,
+        out,
+        profile,
+        &policy,
+        &lensmaps,
+        &output_paths,
+        if ok || report_only { 0 } else { 1 },
+        vec![],
+    );
 }
 
 fn cmd_summary(root: &Path, args: &ParsedArgs) {
@@ -6866,6 +8525,19 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
         .collect::<Vec<_>>();
     let aggregated_policy =
         aggregate_policy_settings(policy_sources.iter().map(|(_, policy)| policy));
+    let production_policy = aggregate_production_settings(
+        loaded_docs
+            .iter()
+            .map(|loaded| production_for_doc(&loaded.doc))
+            .collect::<Vec<_>>()
+            .iter(),
+    );
+    let production_enforced = args.has("production");
+    let production_marker_hits = if production_enforced {
+        collect_production_marker_hits(root, &loaded_docs, &production_policy)
+    } else {
+        vec![]
+    };
 
     let explicit_range = args.get("base").is_some() || args.get("head").is_some();
     let base = args.get("base").unwrap_or("HEAD~1");
@@ -6975,6 +8647,9 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
         if !unreviewed_refs.is_empty() {
             failures.push("unreviewed_notes".to_string());
         }
+        if production_enforced && !production_marker_hits.is_empty() {
+            failures.push("production_strip_required".to_string());
+        }
         failures
     };
 
@@ -7002,7 +8677,8 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
     });
     let _ = fs::write(&output_path, markdown);
 
-    let ok = !strict || strict_failures.is_empty();
+    let ok = (!strict || strict_failures.is_empty())
+        && (!production_enforced || production_marker_hits.is_empty());
     let out = json!({
         "ok": ok,
         "type": "lensmap",
@@ -7010,6 +8686,9 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
         "lensmaps": lensmaps,
         "aggregation": "strictest_union",
         "policy": aggregated_policy,
+        "production_policy": production_policy,
+        "production_enforced": production_enforced,
+        "production_marker_files": production_marker_hits,
         "policy_sources": policy_sources
             .iter()
             .map(|(lensmap, policy)| json!({"lensmap": lensmap, "policy": policy}))
@@ -7028,8 +8707,20 @@ fn cmd_pr_report(root: &Path, args: &ParsedArgs) {
         "output": normalize_relative(root, &output_path),
         "ts": now_iso(),
     });
-    append_history(root, &out);
-    emit(out, if ok { 0 } else { 1 });
+    let profile = parse_redaction_profile(args, "redaction-profile");
+    emit_with_envelope(
+        root,
+        "lensmap",
+        "pr_report",
+        args,
+        out,
+        profile,
+        &aggregated_policy,
+        &lensmaps,
+        &[output_path],
+        if ok { 0 } else { 1 },
+        strict_failures,
+    );
 }
 
 fn reanchor_doc(
@@ -7303,6 +8994,10 @@ fn default_metric_output_path(root: &Path) -> PathBuf {
 
 fn default_scorecard_output_path(root: &Path) -> PathBuf {
     root.join("local/state/ops/lensmap/scorecard.md")
+}
+
+fn default_policy_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/policy.md")
 }
 
 fn default_metric_history_path(root: &Path) -> PathBuf {
@@ -7899,16 +9594,7 @@ fn annotation_has_candidate_signal(text: &str) -> bool {
         return false;
     }
     [
-        "todo",
-        "fixme",
-        "warning",
-        "risk",
-        "hack",
-        "issue",
-        "review",
-        "TODO",
-        "FIXME",
-        "NOTE",
+        "todo", "fixme", "warning", "risk", "hack", "issue", "review", "TODO", "FIXME", "NOTE",
         "NOTE:",
     ]
     .iter()
@@ -7917,7 +9603,7 @@ fn annotation_has_candidate_signal(text: &str) -> bool {
 
 fn autobot_confidence_for_block(text: &str, kind: &str, profile: AutobotProfile) -> f64 {
     let lower = text.to_lowercase();
-    let mut score = 0.36;
+    let mut score: f64 = 0.36;
     if lower.contains("todo") || lower.contains("fixme") {
         score += 0.30;
     }
@@ -7953,7 +9639,7 @@ fn synthetic_ref_id(file: &str, start: usize, end: usize) -> String {
 fn collect_autobot_proposals(
     root: &Path,
     source_files: &[String],
-    doc: &LensMapDoc,
+    _doc: &LensMapDoc,
     existing_keys: &mut HashSet<String>,
     profile: AutobotProfile,
 ) -> (Vec<ImportProposal>, Vec<Value>, usize, usize, usize) {
@@ -8080,7 +9766,11 @@ fn cmd_metrics(root: &Path, args: &ParsedArgs) {
     }
 
     let period = args.get("period").unwrap_or("run").trim();
-    let top = args.get("top").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100);
+    let top = args
+        .get("top")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 100);
     let generated_at = now_iso();
     let snapshot = build_metric_snapshot(root, &lensmaps, top, period, &generated_at);
 
@@ -8115,8 +9805,20 @@ fn cmd_metrics(root: &Path, args: &ParsedArgs) {
         "snapshot": snapshot,
         "ts": now_iso(),
     });
-    append_history(root, &out);
-    emit(out, 0);
+    let profile = parse_redaction_profile(args, "redaction-profile");
+    emit_with_envelope(
+        root,
+        "lensmap",
+        "metrics",
+        args,
+        out,
+        profile,
+        &default_policy_settings(),
+        &lensmaps,
+        &[out_path],
+        0,
+        vec![],
+    );
 }
 
 fn cmd_scorecard(root: &Path, args: &ParsedArgs) {
@@ -8126,7 +9828,11 @@ fn cmd_scorecard(root: &Path, args: &ParsedArgs) {
     }
 
     let period = args.get("period").unwrap_or("run").trim();
-    let top = args.get("top").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100);
+    let top = args
+        .get("top")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 100);
     let generated_at = now_iso();
     let snapshot = build_metric_snapshot(root, &lensmaps, top, period, &generated_at);
     let out_path = args
@@ -8161,8 +9867,20 @@ fn cmd_scorecard(root: &Path, args: &ParsedArgs) {
         "snapshot": snapshot,
         "ts": now_iso(),
     });
-    append_history(root, &out);
-    emit(out, 0);
+    let profile = parse_redaction_profile(args, "redaction-profile");
+    emit_with_envelope(
+        root,
+        "lensmap",
+        "scorecard",
+        args,
+        out,
+        profile,
+        &default_policy_settings(),
+        &lensmaps,
+        &[out_path],
+        0,
+        vec![],
+    );
 }
 
 fn resolve_import_source_files(root: &Path, raw: &str, fallback_covers: &[String]) -> Vec<String> {
@@ -8172,13 +9890,11 @@ fn resolve_import_source_files(root: &Path, raw: &str, fallback_covers: &[String
     resolve_covers_to_files(root, fallback_covers)
 }
 
-fn render_scorecard_markdown(
-    title: &str,
-    snapshot: &Value,
-    health: &Value,
-    rows: usize,
-) -> String {
-    let period = snapshot.get("period").and_then(Value::as_str).unwrap_or("run");
+fn render_scorecard_markdown(title: &str, snapshot: &Value, health: &Value, rows: usize) -> String {
+    let period = snapshot
+        .get("period")
+        .and_then(Value::as_str)
+        .unwrap_or("run");
     let generated_at = snapshot
         .get("generated_at")
         .and_then(Value::as_str)
@@ -8193,18 +9909,9 @@ fn render_scorecard_markdown(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let totals = snapshot
-        .get("totals")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let stats = snapshot
-        .get("stats")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let policy = snapshot
-        .get("policy")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let totals = snapshot.get("totals").cloned().unwrap_or_else(|| json!({}));
+    let stats = snapshot.get("stats").cloned().unwrap_or_else(|| json!({}));
+    let policy = snapshot.get("policy").cloned().unwrap_or_else(|| json!({}));
     let policy_findings = snapshot
         .get("policy_findings")
         .cloned()
@@ -8221,14 +9928,14 @@ fn render_scorecard_markdown(
         .unwrap_or(0);
 
     let metric_labels = |name: &str| match name {
-        "note_coverage_rate" => "Note coverage",
-        "stale_note_ratio" => "Stale notes",
-        "orphan_notes_rate" => "Orphan notes",
-        "no_owner_notes_rate" => "No owner notes",
-        "reviewed_rate" => "Reviewed",
-        "anchor_fidelity_rate" => "Anchor fidelity",
-        "policy_pass_rate" => "Policy pass",
-        _ => name,
+        "note_coverage_rate" => "Note coverage".to_string(),
+        "stale_note_ratio" => "Stale notes".to_string(),
+        "orphan_notes_rate" => "Orphan notes".to_string(),
+        "no_owner_notes_rate" => "No owner notes".to_string(),
+        "reviewed_rate" => "Reviewed".to_string(),
+        "anchor_fidelity_rate" => "Anchor fidelity".to_string(),
+        "policy_pass_rate" => "Policy pass".to_string(),
+        _ => name.to_string(),
     };
 
     let mut lines = vec![
@@ -8289,7 +9996,10 @@ fn render_scorecard_markdown(
     lines.push("## Policy".to_string());
     lines.push(format!(
         "- Policy checks: {} checks | {} errors | {} warnings",
-        totals.get("policy_checks").and_then(Value::as_u64).unwrap_or(0),
+        totals
+            .get("policy_checks")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         policy_errors,
         policy_warnings,
     ));
@@ -8318,7 +10028,10 @@ fn render_scorecard_markdown(
         lines.push(format!("- Require owner: {}", require_owner));
         lines.push(format!("- Require author: {}", require_author));
         lines.push(format!("- Require template: {}", require_template));
-        lines.push(format!("- Require review status: {}", require_review_status));
+        lines.push(format!(
+            "- Require review status: {}",
+            require_review_status
+        ));
     }
     lines.push(String::new());
 
@@ -8334,14 +10047,20 @@ fn render_scorecard_markdown(
     ];
     for (section, key) in counter_sections {
         lines.push(format!("### {}", section));
-        let rows_value = stats.get(key).and_then(Value::as_array).unwrap_or_default();
+        let rows_value: &[Value] = match stats.get(key).and_then(Value::as_array) {
+            Some(rows) => rows,
+            None => &[],
+        };
         if rows_value.is_empty() {
             lines.push("- none".to_string());
             lines.push(String::new());
             continue;
         }
         for item in rows_value.iter().take(rows.max(1)) {
-            let name = item.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             let count = item.get("count").and_then(Value::as_u64).unwrap_or(0);
             lines.push(format!("- `{}`: {}", name, count));
         }
@@ -8354,7 +10073,10 @@ fn render_scorecard_markdown(
             lines.push("- none".to_string());
         } else {
             for item in distribution.iter() {
-                let bucket = item.get("bucket").and_then(Value::as_str).unwrap_or("unknown");
+                let bucket = item
+                    .get("bucket")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 let count = item.get("count").and_then(Value::as_u64).unwrap_or(0);
                 let share = item.get("share").and_then(Value::as_f64).unwrap_or(0.0);
                 lines.push(format!("- {}: {} ({:.2}%)", bucket, count, share));
@@ -8366,22 +10088,23 @@ fn render_scorecard_markdown(
 
     lines.push("## Health".to_string());
     if let Some(obj) = health.as_object() {
-        for name in rows.max(1).min(obj.len()) {
-            let key = obj.keys().nth(name).unwrap_or(&"unknown");
-            if let Some(item) = obj.get(key) {
-                let status = item.get("status").and_then(Value::as_str).unwrap_or("unknown");
-                let value = item.get("value").and_then(Value::as_f64).unwrap_or(0.0);
-                let green = item.get("green").and_then(Value::as_f64).unwrap_or(0.0);
-                let yellow = item.get("yellow").and_then(Value::as_f64).unwrap_or(0.0);
-                let higher_is_better = item
-                    .get("higher_is_better")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(true);
-                lines.push(format!(
-                    "- {}: {} ({:.2}, green>= {:.2}, yellow>= {:.2}, higher_is_better={})",
-                    key, status, value, green, yellow, higher_is_better
-                ));
-            }
+        let row_limit = rows.max(1).min(obj.len());
+        for (key, item) in obj.iter().take(row_limit) {
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let value = item.get("value").and_then(Value::as_f64).unwrap_or(0.0);
+            let green = item.get("green").and_then(Value::as_f64).unwrap_or(0.0);
+            let yellow = item.get("yellow").and_then(Value::as_f64).unwrap_or(0.0);
+            let higher_is_better = item
+                .get("higher_is_better")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
+            lines.push(format!(
+                "- {}: {} ({:.2}, green>= {:.2}, yellow>= {:.2}, higher_is_better={})",
+                key, status, value, green, yellow, higher_is_better
+            ));
         }
     }
 
@@ -8480,12 +10203,14 @@ fn cmd_autobot(root: &Path, args: &ParsedArgs) {
     for item in &accepted {
         simulation.entries.push(item.entry.clone());
     }
-    let (policy, errors, warnings, _) =
-        collect_aggregated_policy_findings(root, &[LoadedLensMapDoc {
+    let (policy, errors, warnings, _) = collect_aggregated_policy_findings(
+        root,
+        &[LoadedLensMapDoc {
             lensmap: normalize_relative(root, &lensmap_path),
             path: lensmap_path.clone(),
             doc: simulation.clone(),
-        }]);
+        }],
+    );
     let policy_failure_count = errors.len() + warnings.len();
     let mut policy_failures = vec![];
     for item in errors.iter().chain(warnings.iter()) {
@@ -8597,7 +10322,16 @@ fn cmd_autobot(root: &Path, args: &ParsedArgs) {
         ),
     );
     append_history(root, &out);
-    emit(out, if applied { 0 } else if strict_policy && policy_failure_count > 0 { 1 } else { 0 });
+    emit(
+        out,
+        if applied {
+            0
+        } else if strict_policy && policy_failure_count > 0 {
+            1
+        } else {
+            0
+        },
+    );
 }
 
 fn cmd_import(root: &Path, args: &ParsedArgs) {
@@ -8815,12 +10549,31 @@ fn cmd_sync(root: &Path, args: &ParsedArgs) {
         index_entries = Some(entries.len());
     }
 
-    let ok = unresolved.is_empty();
+    let production_policy = production_for_doc(&doc);
+    let production_enforced = args.has("production");
+    let production_marker_hits = if production_enforced {
+        collect_production_marker_hits(
+            root,
+            &[LoadedLensMapDoc {
+                lensmap: lensmap_rel.clone(),
+                path: lensmap_path.clone(),
+                doc: doc.clone(),
+            }],
+            &production_policy,
+        )
+    } else {
+        vec![]
+    };
+
+    let ok = unresolved.is_empty() && (!production_enforced || production_marker_hits.is_empty());
     let out = json!({
         "ok": ok,
         "type": "lensmap",
         "action": "sync",
         "lensmap": normalize_relative(root, &lensmap_path),
+        "production_policy": production_policy,
+        "production_enforced": production_enforced,
+        "production_marker_files": production_marker_hits,
         "artifacts": {
             "canonical_json": canonical_path,
             "readable_markdown": {
@@ -9201,8 +10954,8 @@ fn load_repo_lensmap_docs(root: &Path, lensmaps: &[String]) -> Vec<LoadedLensMap
                 path: path.clone(),
                 doc: load_doc(&path, "group"),
             })
-    })
-    .collect()
+        })
+        .collect()
 }
 
 fn read_history_rows(root: &Path, path: &Path) -> Vec<Value> {
@@ -9229,11 +10982,14 @@ fn read_history_rows(root: &Path, path: &Path) -> Vec<Value> {
 }
 
 fn as_f64_or_default(value: &Value) -> Option<f64> {
-    value.as_f64().or_else(|| value.as_u64().map(|v| v as f64)).or_else(|| {
-        value
-            .as_i64()
-            .and_then(|v| if v >= 0 { Some(v as f64) } else { None })
-    })
+    value
+        .as_f64()
+        .or_else(|| value.as_u64().map(|v| v as f64))
+        .or_else(|| {
+            value
+                .as_i64()
+                .and_then(|v| if v >= 0 { Some(v as f64) } else { None })
+        })
 }
 
 fn entry_record_from_search_entry(entry: &SearchEntryRecord) -> EntryRecord {
@@ -9294,7 +11050,7 @@ fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
     let history_path = default_metric_history_path(root);
     let history = read_history_rows(root, &history_path);
 
-    let mut latest = None;
+    let mut latest: Option<(DateTime<Utc>, Value)> = None;
     let mut latest_rates = BTreeMap::new();
     for row in history {
         if row.get("period").and_then(Value::as_str).unwrap_or("run") != period {
@@ -9304,12 +11060,17 @@ fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
             .get("generated_at")
             .and_then(Value::as_str)
             .and_then(|raw| DateTime::parse_from_rfc3339(raw).ok())
+            .map(|dt| dt.with_timezone(&Utc))
         else {
             continue;
-        }
-        .with_timezone(&Utc);
+        };
 
-        if latest.is_none_or(|(prev, _)| timestamp > *prev) {
+        let should_update = if let Some((prev, _)) = latest.as_ref() {
+            timestamp > *prev
+        } else {
+            true
+        };
+        if should_update {
             let snapshot = row
                 .get("snapshot")
                 .unwrap_or_else(|| row.get("metrics").unwrap_or(&row));
@@ -9325,7 +11086,13 @@ fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
     latest_rates
 }
 
-fn append_metric_history(root: &Path, period: &str, generated_at: &str, metrics: &Value, out_path: &Path) {
+fn append_metric_history(
+    root: &Path,
+    period: &str,
+    generated_at: &str,
+    metrics: &Value,
+    out_path: &Path,
+) {
     let history_path = default_metric_history_path(root);
     ensure_dir(&history_path);
     let row = json!({
@@ -9362,8 +11129,7 @@ fn build_metric_snapshot(
         .iter()
         .map(|loaded| (loaded.lensmap.clone(), policy_for_doc(&loaded.doc)))
         .collect::<Vec<_>>();
-    let (policy, errors, warnings, _) =
-        collect_aggregated_policy_findings(root, &loaded_docs);
+    let (policy, errors, warnings, _) = collect_aggregated_policy_findings(root, &loaded_docs);
     let entries = collect_repo_search_entries(root, lensmaps);
     let stats = summary_stats(&entries, policy.stale_after_days);
 
@@ -9383,7 +11149,12 @@ fn build_metric_snapshot(
         {
             orphan_notes = orphan_notes.saturating_add(1);
         }
-        if entry_record.owner.as_ref().map(|value| value.trim().is_empty()).unwrap_or(true) {
+        if entry_record
+            .owner
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
             unowned_notes = unowned_notes.saturating_add(1);
         }
 
@@ -9429,22 +11200,34 @@ fn build_metric_snapshot(
         build_metric_rate_row(
             "note_coverage_rate",
             note_coverage_rate,
-            &metric_rate_trend(note_coverage_rate, previous_rates.get("note_coverage_rate").copied()),
+            &metric_rate_trend(
+                note_coverage_rate,
+                previous_rates.get("note_coverage_rate").copied(),
+            ),
         ),
         build_metric_rate_row(
             "stale_note_ratio",
             stale_note_ratio,
-            &metric_rate_trend(stale_note_ratio, previous_rates.get("stale_note_ratio").copied()),
+            &metric_rate_trend(
+                stale_note_ratio,
+                previous_rates.get("stale_note_ratio").copied(),
+            ),
         ),
         build_metric_rate_row(
             "orphan_notes_rate",
             orphan_notes_rate,
-            &metric_rate_trend(orphan_notes_rate, previous_rates.get("orphan_notes_rate").copied()),
+            &metric_rate_trend(
+                orphan_notes_rate,
+                previous_rates.get("orphan_notes_rate").copied(),
+            ),
         ),
         build_metric_rate_row(
             "no_owner_notes_rate",
             no_owner_notes_rate,
-            &metric_rate_trend(no_owner_notes_rate, previous_rates.get("no_owner_notes_rate").copied()),
+            &metric_rate_trend(
+                no_owner_notes_rate,
+                previous_rates.get("no_owner_notes_rate").copied(),
+            ),
         ),
         build_metric_rate_row(
             "reviewed_rate",
@@ -9462,7 +11245,10 @@ fn build_metric_snapshot(
         build_metric_rate_row(
             "policy_pass_rate",
             policy_pass_rate,
-            &metric_rate_trend(policy_pass_rate, previous_rates.get("policy_pass_rate").copied()),
+            &metric_rate_trend(
+                policy_pass_rate,
+                previous_rates.get("policy_pass_rate").copied(),
+            ),
         ),
     ];
 
@@ -9889,16 +11675,26 @@ fn usage() {
     println!("lensmap scan [--lensmap=path] [--covers=a,b] [--anchor-mode=smart|all] [--anchor-placement=inline|standalone] [--dry-run]");
     println!("lensmap extract-comments [--lensmap=path] [--covers=a,b] [--dry-run]");
     println!(
-        "lensmap unmerge [--lensmap=path] [--covers=a,b] [--dry-run]  # alias of extract-comments"
+        "lensmap unmerge [--lensmap=path] [--covers=a,b] [--strip] [--clean-anchors=true|false] [--clean-refs=true|false] [--dry-run]  # alias of extract-comments"
     );
     println!("lensmap merge [--lensmap=path] [--covers=a,b] [--dry-run]");
     println!(
-        "lensmap package [--bundle-dir=.lenspack] [--mode=move|copy] [--lensmaps=a,b] [--dry-run]"
+        "lensmap package [--bundle-dir=.lenspack] [--mode=move|copy] [--lensmaps=a,b] [--strip-sources] [--production] [--out-format=tar.gz] [--dry-run]"
+    );
+    println!(
+        "lensmap package evidence [--bundle-dir=.lenspack] [--compression-mode=none|copy] [--redaction-profile=debug|audit|operational|clinical|emergency] [--retention-days=N] [--include-metrics] [--include-scorecard] [--include-policy] [--include-pr-report] [--checkpoint=<path>] [--resume]"
     );
     println!("lensmap unpackage [--bundle-dir=.lenspack] [--on-missing=prompt|skip|error] [--map=old_dir=new_dir] [--overwrite] [--dry-run]");
+    println!("lensmap strip [--source=src,api] [--out-dir=dist/prod] [--clean-anchors=true|false] [--clean-refs=true|false] [--exclude-patterns=glob,glob] [--check] [--in-place --force] [--dry-run]");
+    println!(
+        "lensmap verify [--bundle-dir=.lenspack] [--envelope=<path>]  # validate bundle signatures and replay chain"
+    );
+    println!(
+        "lensmap restore [--bundle-dir=.lenspack] [--on-missing=prompt|skip|error] [--overwrite] [--dry-run]  # alias of evidence restore"
+    );
     println!("lensmap validate [--lensmap=path]");
-    println!("lensmap policy init [--lensmap=path] [--require-owner=true|false] [--require-author=true|false] [--require-template=true|false] [--require-review-status=true|false] [--stale-after-days=N] [--required-patterns=glob,glob]");
-    println!("lensmap policy check [--lensmap=path | --lensmaps=a,b] [--fail-on-warnings] [--report-only] [--out=path]  # aggregates all discovered LensMaps by default");
+    println!("lensmap policy init [--lensmap=path] [--require-owner=true|false] [--require-author=true|false] [--require-template=true|false] [--require-review-status=true|false] [--stale-after-days=N] [--required-patterns=glob,glob] [--production-strip-anchors=true|false] [--production-strip-refs=true|false] [--production-strip-on-package=true|false] [--production-exclude-patterns=glob,glob]");
+    println!("lensmap policy check [--lensmap=path | --lensmaps=a,b] [--fail-on-warnings] [--report-only] [--production] [--out=path]  # aggregates all discovered LensMaps by default");
     println!("lensmap reanchor [--lensmap=path] [--dry-run]  # git-aware conflict protection on dirty overlaps");
     println!("lensmap render [--lensmap=path] [--file=path] [--symbol=name|path] [--ref=HEX-start[-end]] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--out=path]");
     println!("lensmap parse [--lensmap=path] [--out=path]  # alias of render");
@@ -9909,10 +11705,10 @@ fn usage() {
     println!("lensmap summary [--lensmaps=a,b] [--file=path] [--kind=comment|doc|todo|decision] [--owner=name] [--template=name] [--review-status=status] [--scope=path] [--tag=tag] [--base=rev --head=rev] [--top=N] [--out=path]  # strictest policy aggregation across lensmaps");
     println!("lensmap metrics [--lensmaps=a,b] [--bundle-dir=.lenspack] [--period=run] [--top=N] [--out=path]");
     println!("lensmap scorecard [--lensmaps=a,b] [--bundle-dir=.lenspack] [--period=run] [--top=N] [--out=path]");
-    println!("lensmap pr report [--lensmaps=a,b] [--base=rev --head=rev] [--strict] [--out=path]  # strictest policy aggregation across lensmaps");
+    println!("lensmap pr report [--lensmaps=a,b] [--base=rev --head=rev] [--strict] [--production] [--out=path]  # strictest policy aggregation across lensmaps");
     println!("lensmap polish");
     println!("lensmap import --from=<path>");
-    println!("lensmap sync [--lensmap=path] [--to=path] [--index=path]  # reanchor + simplify + artifact refresh");
+    println!("lensmap sync [--lensmap=path] [--to=path] [--index=path] [--production]  # reanchor + simplify + artifact refresh");
     println!("lensmap expose --name=<lens_name>");
     println!("lensmap status [--lensmap=path]");
     println!();
@@ -9938,8 +11734,10 @@ fn usage() {
         "  lensmap pr report --lensmaps=demo/lensmap.json --base=origin/main --head=HEAD --strict"
     );
     println!("  lensmap merge --lensmap=demo/lensmap.json");
-    println!("  lensmap unmerge --lensmap=demo/lensmap.json");
+    println!("  lensmap unmerge --lensmap=demo/lensmap.json --strip");
     println!("  lensmap package --bundle-dir=.lenspack");
+    println!("  lensmap package --bundle-dir=.lenspack --strip-sources --out-format=tar.gz");
+    println!("  lensmap strip --source=demo/src --out-dir=demo/dist/prod");
     println!("  lensmap unpackage --bundle-dir=.lenspack --on-missing=prompt");
     println!("  lensmap sync --lensmap=demo/lensmap.json");
     println!("  lensmap validate --lensmap=demo/lensmap.json");
@@ -9982,8 +11780,14 @@ fn main() {
         "extract-comments" => cmd_extract_comments(&root, &args),
         "unmerge" => cmd_extract_comments(&root, &args),
         "merge" => cmd_merge(&root, &args),
+        "package" if args.positional.get(1).map(String::as_str) == Some("evidence") => {
+            cmd_package_evidence(&root, &args)
+        }
         "package" => cmd_package(&root, &args),
+        "strip" => cmd_strip(&root, &args),
         "unpackage" => cmd_unpackage(&root, &args),
+        "restore" => cmd_unpackage(&root, &args),
+        "verify" => cmd_verify(&root, &args),
         "validate" => cmd_validate(&root, &args),
         "policy" if args.positional.get(1).map(String::as_str) == Some("init") => {
             cmd_policy_init(&root, &args)

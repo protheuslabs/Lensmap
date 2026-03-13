@@ -10,6 +10,7 @@
   "command.runPolicyCheck": "LensMap: Run Policy Check",
   "command.showSummary": "LensMap: Show Workspace Summary",
   "command.showPrReport": "LensMap: Show PR Report",
+  "command.showProductionPreview": "LensMap: Show Production Preview",
   "command.revealEntry": "LensMap: Reveal Note Location",
   "command.revealEntryGroup": "LensMap: Reveal Note Group",
   "view.sidebar": "LensMap",
