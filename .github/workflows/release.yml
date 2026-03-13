@@ -37,6 +37,10 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Production strip gate
+        if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/heads/release/')
+        run: cargo run --locked -- strip --source=. --check --clean-anchors=true --clean-refs=true --exclude-patterns='target/**,node_modules/**,dist/**,.git/**,.lenspack/**'
+
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 

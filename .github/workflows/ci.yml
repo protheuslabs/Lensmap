@@ -3,7 +3,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, "release/*"]
 
 jobs:
   build:
@@ -11,5 +11,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Production strip gate
+        if: startsWith(github.ref, 'refs/heads/release/')
+        run: cargo run --locked -- strip --source=. --check --clean-anchors=true --clean-refs=true --exclude-patterns='target/**,node_modules/**,dist/**,.git/**,.lenspack/**'
       - name: Check
         run: cargo check --workspace --all-targets

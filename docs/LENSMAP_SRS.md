@@ -358,6 +358,110 @@ This tranche covers:
 - LensMap shall provide an artifact verification mode that checks signatures and chain continuity before consuming or merging artifacts.
 - LensMap shall preserve provenance across packaging/unpack operations and report mismatches as hard failures in strict mode.
 
+### LM-SRS-037 Test Evidence Compression and Compliance Packaging
+
+- LensMap shall provide a `test package` command path that compresses and archives test evidence together with governance artifacts for CI and audit workflows.
+- Each test evidence package shall include:
+  - run metadata (command, repo state, seed/version),
+  - policy and profile snapshot,
+  - `metrics` JSON snapshot,
+  - `scorecard` artifacts (JSON and markdown),
+  - `policy` report payloads,
+  - PR report payloads and receipts where applicable,
+  - validation outputs and error traces.
+- Packaging output shall be deterministic (sorted file ordering, stable compression format/level) and optionally redacted by policy.
+- LensMap shall support package integrity verification (`verify`) with hash/signature checks and reproducible manifest replay before extraction.
+- LensMap shall support decompression/unpackage flows that retain provenance, enable chain validation, and can be reused for reproducible incident review.
+
+### LM-SRS-038 Standard Evidence Envelope and Receipt Contract
+
+- LensMap shall define one canonical evidence envelope format for all enterprise-facing command outputs, including:
+  - `metrics`,
+  - `scorecard`,
+  - `policy`,
+  - `pr report`,
+  - `autobot`,
+  - and packaged artifacts.
+- The envelope shall include:
+  - command identity and version,
+  - execution profile,
+  - policy hash/version,
+  - input/output artifact refs,
+  - deterministic execution fingerprint,
+  - and machine-readable status/error metadata.
+- All commands in this surface shall emit receipts in this schema so downstream consumers can process evidence without command-specific parsers.
+
+### LM-SRS-039 Shared Evidence Bundle Pipeline
+
+- LensMap shall provide a shared artifact bundle builder used by `package`, `evidence package`, `metrics`, `scorecard`, and `pr report`.
+- The shared pipeline shall support:
+  - artifact discovery via typed registrations,
+  - schema validation,
+  - policy-aware redaction,
+  - deterministic manifest generation,
+  - compression settings.
+- The same pipeline shall be reusable by editor/plugin integrations and external extensions through a simple adapter interface.
+
+### LM-SRS-040 Unified Export/Package Command Families
+
+- LensMap shall unify related export paths into command families rather than bespoke code paths, including:
+  - `package` (artifact package),
+  - `package evidence` (governance/test evidence),
+  - and plugin distribution packaging.
+- Each family member shall use the shared evidence envelope and bundle pipeline and expose common flags:
+  - output path,
+  - compression mode,
+  - redaction policy,
+  - verification level,
+  - and deterministic replay key.
+
+### LM-SRS-041 Unified Verification and Restore Flows
+
+- LensMap shall provide one shared `verify` flow for all package and evidence types before consume/merge/unpack.
+- Verify behavior shall include signature/hash checks, schema checks, redaction policy checks, and provenance replay checks.
+- LensMap shall provide one shared restore flow for rehydrating packaged evidence and replaying historical command state.
+
+### LM-SRS-042 Centralized Redaction and Retention Profiles
+
+- LensMap shall define centralized redaction profiles for evidence classes (debug, audit, operational, clinical, emergency) and map them to command families.
+- Operators shall be able to define retention windows by evidence class, policy scope, and legal basis.
+- Retention and redaction decisions shall be recorded in the command receipt and enforced during packaging and restore.
+
+### LM-SRS-043 Parallel Execution and Checkpoint Harmonization
+
+- LensMap shall expose one resumable checkpoint and parallel execution engine for long-running commands that already use concurrency (scan, summary, report, policy, packaging).
+- All long-running workflows in this engine shall:
+  - support bounded parallelism,
+  - persist resume markers,
+  - support checkpoint integrity validation,
+  - and support deterministic ordering with reproducible outputs.
+- Extension and plugin paths shall reuse this engine to avoid parallel behavior drift.
+
+### LM-SRS-044 Internal Engineering Team-Ready Baseline
+
+- `LM-SRS-044.1` LensMap shall define one documented default workflow for team adoption: `init`, `scan`, `annotate`, `policy check`, `summary`, `metrics`, `scorecard`, `pr report`, `package evidence`, `verify`, and `restore`.
+- `LM-SRS-044.2` Each command in the default workflow shall expose stable defaults for output paths, bundle paths, and artifact names so a team can script against them without per-repo customization.
+- `LM-SRS-044.3` Each default-workflow command shall emit an actionable machine-readable failure taxonomy with stable error codes for at minimum invalid input, missing dependency artifact, policy violation, verification failure, and fail-closed security refusal.
+- `LM-SRS-044.4` LensMap shall generate dependent local artifacts on demand for the default workflow where the source state is available, so `package evidence` can materialize policy, metrics, scorecard, and PR evidence without manual pre-staging.
+- `LM-SRS-044.5` LensMap shall keep developer outputs diff-friendly by enforcing stable JSON key order, stable file/member ordering in manifests, stable markdown section order, and no write on no-op unless the semantic payload changed.
+- `LM-SRS-044.6` LensMap shall provide one command-oriented bootstrap path for new repos that creates or documents the minimum policy, CI invocation, and editor setup needed to adopt the default workflow.
+- `LM-SRS-044.7` LensMap shall provide a default local CI example that runs policy, reporting, packaging, verification, and restore checks with no bespoke shell glue beyond repo-local path selection.
+- `LM-SRS-044.8` LensMap shall ship targeted regression coverage for the default workflow including note lifecycle happy path, policy failure path, PR report generation, package/verify/restore round trip, and fail-closed security output checks.
+- `LM-SRS-044.9` LensMap shall provide one repo-local operator document that explains the default workflow, artifact locations, common error recovery, and minimal editor/CI setup for an engineering team.
+
+### LM-SRS-045 Enterprise Release Readiness and Audit Gate
+
+- `LM-SRS-045.1` LensMap shall implement a deterministic archive format for enterprise packages with explicit compression profile, sorted member ordering, stable manifest ordering, and reproducible byte output for the same inputs and policy state.
+- `LM-SRS-045.2` `verify` shall enforce manifest integrity, envelope integrity, artifact hash or signature validation, schema compatibility, redaction profile compliance, retention policy compliance, and replay consistency before any restore or consume path is allowed to continue.
+- `LM-SRS-045.3` `restore` shall be verification-gated by default and shall refuse to materialize artifacts that fail provenance or policy checks unless a break-glass mode is explicitly enabled and recorded in the resulting receipt.
+- `LM-SRS-045.4` Enterprise packaging shall fail closed when requested dependent artifacts such as policy, metrics, scorecard, PR report, compatibility manifest, or verification receipt cannot be generated or located.
+- `LM-SRS-045.5` Enterprise command families shall share one checkpoint and locking model that supports bounded parallelism, duplicate-run suppression, checkpoint integrity validation, and deterministic resume after interruption.
+- `LM-SRS-045.6` LensMap shall provide a release-gate command or CI lane that fails closed unless successful build receipts, targeted regression receipts, at least one security or sovereignty receipt, verification receipts, and runtime artifact evidence are present for the release candidate.
+- `LM-SRS-045.7` LensMap shall emit a compatibility manifest for enterprise releases covering CLI schema version, report schema version, package format version, editor integration compatibility, and supported migration window.
+- `LM-SRS-045.8` LensMap shall provide artifact reproducibility proof for enterprise evidence flows by recording the input hashes, policy hash, environment/version metadata, and replay key required to reproduce the same outputs.
+- `LM-SRS-045.9` LensMap shall maintain an enterprise runbook covering signing-key changes, retention policy changes, break-glass restore usage, incident evidence recovery, rollback, and compatibility-window enforcement.
+- `LM-SRS-045.10` LensMap shall ship targeted fault and security tests for enterprise evidence flows, including corrupted manifest, corrupted envelope, corrupted artifact, lock contention, interrupted package run, interrupted restore run, and prohibited output path scenarios.
+
 ### LM-SRS-025 Enterprise Onboarding and Fleet Rollout
 
 - LensMap shall support bulk repository onboarding workflows with:
@@ -437,9 +541,23 @@ This tranche covers:
 - LensMap can be centrally governed through a control plane with deterministic replay and policy version lineage.
 - Compliance reporting can produce evidence bundles mapped to control frameworks with retention and redaction guarantees.
 - Reliability behavior is governed by SLO contracts, failure-mode simulations, and alertable risk signals.
+- LensMap can generate and verify compressed, deterministic test-evidence packages for CI, incident review, and compliance evidence retention.
+- All enterprise command artifacts can be consumed through the standardized evidence envelope contract.
+- Evidence bundling for governance, CI, and plugin flows uses one shared pipeline and shared verification/restore path.
+- Evidence retention and redaction are applied through centralized policy profiles across packaging and restore operations.
+- Long-running enterprise commands produce resumable checkpoints with deterministic replay and bounded parallel execution.
 - API/schema/extension compatibility is governed with documented migration paths and machine-readable compatibility manifests.
 - LensMap emits a periodic maintainability scorecard and publishes trend and threshold breaches for executive and team review.
 - Human governance KPIs are tracked in the operations playbook and linked to automated scorecard evidence.
 - LensMap can run an automated onboarding/autobot pipeline from extraction through policy-enforced staging, with explicit confidence routing.
 - Auto-extracted notes are converted to canonical format with deterministic conflict behavior and human-gated ambiguity handling.
 - Validation, regression tests, and a fail-closed security proof all pass after the tranche.
+- CLI evidence packaging supports redaction profiles, retention windows, hash-chained manifests, and optional inclusion of metrics, scorecard, and PR report artifacts.
+- A verify command validates packaged and source fingerprints before restore and emits the standard evidence envelope.
+- Metrics, scorecard, policy check, and PR report outputs are wrapped in evidence envelopes for governance consumption.
+- A new engineering team can adopt LensMap using the documented default workflow and complete a package/verify/restore round trip without custom scripting.
+- An enterprise qualification run fails closed unless deterministic packaging, full verification, regression coverage, and security validation receipts are present.
+- The default workflow emits stable output paths and stable error codes that a repo-local CI job can consume without custom parsing.
+- `package evidence` can generate or resolve all required dependent artifacts for the requested include flags, or fail closed with explicit missing-artifact errors.
+- `verify` blocks invalid restore operations for corrupted, policy-incompatible, or schema-incompatible evidence bundles.
+- Enterprise release qualification produces a compatibility manifest, reproducibility proof, and runtime validation receipts in addition to build, regression, and security receipts.

@@ -33,6 +33,7 @@
     "onCommand:lensmap.runPolicyCheck",
     "onCommand:lensmap.showSummary",
     "onCommand:lensmap.showPrReport",
+    "onCommand:lensmap.showProductionPreview",
     "onCommand:lensmap.revealEntry",
     "onCommand:lensmap.revealEntryGroup",
     "onView:lensmapSidebar",
@@ -103,6 +104,10 @@
         "title": "%command.showPrReport%"
       },
       {
+        "command": "lensmap.showProductionPreview",
+        "title": "%command.showProductionPreview%"
+      },
+      {
         "command": "lensmap.revealEntry",
         "title": "%command.revealEntry%"
       },
@@ -145,6 +150,11 @@
           "command": "lensmap.showPrReport",
           "when": "view == lensmapSidebar",
           "group": "navigation@5"
+        },
+        {
+          "command": "lensmap.showProductionPreview",
+          "when": "view == lensmapSidebar",
+          "group": "navigation@6"
         }
       ],
       "view/item/context": [

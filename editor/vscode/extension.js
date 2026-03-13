@@ -262,6 +262,7 @@ function activate(context) {
     vscode.commands.registerCommand("lensmap.runPolicyCheck", runPolicyCheck),
     vscode.commands.registerCommand("lensmap.showSummary", showSummary),
     vscode.commands.registerCommand("lensmap.showPrReport", showPrReport),
+    vscode.commands.registerCommand("lensmap.showProductionPreview", showProductionPreview),
     vscode.commands.registerCommand("lensmap.revealEntry", revealEntry),
     vscode.commands.registerCommand("lensmap.revealEntryGroup", revealEntryGroup),
     vscode.languages.registerHoverProvider(SUPPORTED_LANGUAGES, {
@@ -388,6 +389,47 @@ async function showFileNotes() {
   } catch (error) {
     vscode.window.showErrorMessage(
       t(`LensMap show failed: ${error.message}`, `LensMap 显示失败：${error.message}`),
+    );
+  }
+}
+
+async function showProductionPreview() {
+  const editor = vscode.window.activeTextEditor;
+  if (!editor) {
+    vscode.window.showErrorMessage(t("LensMap needs an active editor.", "LensMap 需要一个当前激活的编辑器。"));
+    return;
+  }
+  const ctx = await resolveLensmapContext(editor.document.uri);
+  if (!ctx) {
+    return;
+  }
+
+  const previewRoot = path.join(ctx.workspaceRoot, "local", "state", "lensmap", "vscode", "production-preview");
+  await fs.promises.mkdir(previewRoot, { recursive: true });
+  const outDir = toPosix(path.relative(ctx.workspaceRoot, previewRoot));
+  try {
+    const payload = await runLensmap(ctx.workspaceRoot, [
+      "strip",
+      `--source=${ctx.relativeFile}`,
+      `--out-dir=${outDir}`,
+      "--clean-anchors=true",
+      "--clean-refs=true",
+    ]);
+    if (!payload.ok) {
+      throw new Error(payload.error || t("Production preview failed.", "生产预览失败。"));
+    }
+
+    const previewPath = path.join(previewRoot, fromPosix(ctx.relativeFile));
+    const uri = vscode.Uri.file(previewPath);
+    const doc = await vscode.workspace.openTextDocument(uri);
+    await vscode.window.showTextDocument(doc, {
+      preview: true,
+      preserveFocus: false,
+      viewColumn: vscode.ViewColumn.Beside,
+    });
+  } catch (error) {
+    vscode.window.showErrorMessage(
+      t(`LensMap production preview failed: ${error.message}`, `LensMap 生产预览失败：${error.message}`),
     );
   }
 }
