@@ -89,6 +89,13 @@ iwr https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.
 ./install.ps1 -Version v0.3.12
 ```
 
+To verify release integrity, use the published checksum file. Enable verification with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/protheuslabs/Lensmap/main/scripts/install.sh | VERIFY_CHECKSUMS=1 bash -s -- v0.3.12
+./install.ps1 -Version v0.3.12 -VerifyChecksums
+```
+
 ### Build from source
 
 ```bash
@@ -291,11 +298,23 @@ Run `lensmap strip --source=src --out-dir=build/lensmap-prod` before archive tas
 ### GitHub Actions
 
 ```yaml
+- name: Policy and packaging gate
+  run: cargo run --locked -- policy check --fail-on-warnings
 - name: LensMap strip gate
   run: cargo run --locked -- strip --source=. --check --clean-anchors=true --clean-refs=true
 - name: LensMap production package
   run: cargo run --locked -- package --bundle-dir=.lenspack --production --out-format=tar.gz
 ```
+
+### Release artifact hardening
+
+- Release workflows now publish SHA-256 checksum files and deterministic build manifests for each platform target.
+- Release assets are attestation-ready through GitHub artifact attestation (`actions/attest-build-provenance`).
+- The release manifest can be used for reproducibility checks:
+  - artifact hash
+  - source commit
+  - target platform
+  - build format
 
 ## Editor Integration
 

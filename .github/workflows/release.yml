@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -49,11 +50,29 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-0}"
           version="${GITHUB_REF_NAME}"
           name="lensmap-${version}-${{ matrix.target }}"
+          binary="lensmap"
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/lensmap" "$name"
-          tar -czf "dist/${name}.tar.gz" "$name"
+          cp "target/${{ matrix.target }}/release/${binary}" "$binary"
+          binary_hash="$(sha256sum "$binary" | awk '{print $1}')"
+          printf '%s  %s\n' "$binary_hash" "$binary" > "dist/${name}.binary.sha256"
+          tar --sort=name --owner=0 --group=0 --numeric-owner --format=gnutar --mtime="@$SOURCE_DATE_EPOCH" -czf "dist/${name}.tar.gz" "$binary"
+          archive_hash="$(sha256sum "dist/${name}.tar.gz" | awk '{print $1}')"
+          printf '%s  %s\n' "$archive_hash" "${name}.tar.gz" > "dist/${name}.tar.gz.sha256"
+          mkdir -p "dist/manifest"
+          cat > "dist/manifest/${name}.json" <<JSON
+          {
+            "name": "${name}",
+            "target": "${{ matrix.target }}",
+            "os": "${{ matrix.os }}",
+            "format": "tar.gz",
+            "version": "${version}",
+            "git_commit": "${GITHUB_SHA}",
+            "sha256": "${archive_hash}"
+          }
+JSON
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -61,17 +80,58 @@ jobs:
         run: |
           $version = "$env:GITHUB_REF_NAME"
           $name = "lensmap-$version-${{ matrix.target }}"
+          $binary = "lensmap.exe"
           New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/lensmap.exe" "$name.exe"
-          Compress-Archive -Path "$name.exe" -DestinationPath "dist/$name.zip" -Force
+          Copy-Item "target/${{ matrix.target }}/release/$binary" $binary
+          $binaryHash = Get-FileHash -Path $binary -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+          "$($binaryHash.ToLower())  $binary" | Out-File -Encoding utf8 -NoNewline "dist/$name.binary.sha256"
+          Compress-Archive -Path $binary -DestinationPath "dist/$name.zip" -Force
+          $archiveHash = Get-FileHash -Path "dist/$name.zip" -Algorithm SHA256 | Select-Object -ExpandProperty Hash
+          "$($archiveHash.ToLower())  ${name}.zip" | Out-File -Encoding utf8 -NoNewline "dist/$name.zip.sha256"
+          New-Item -ItemType Directory -Path "dist/manifest" -Force | Out-Null
+          @"
+          {
+            \"name\": \"$name\",
+            \"target\": \"${{ matrix.target }}\",
+            \"os\": \"${{ matrix.os }}\",
+            \"format\": \"zip\",
+            \"version\": \"$version\",
+            \"git_commit\": \"${{ github.sha }}\",
+            \"sha256\": \"$($archiveHash.ToLower())\",
+            \"binary\": \"$binary\"
+          }
+"@ | Out-File -Encoding utf8 -NoNewline "dist/manifest/$name.json"
 
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
           path: dist/*
 
-  publish:
+  attest:
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Generate aggregate checksums
+        run: |
+          set -euo pipefail
+          find dist -type f \( -name "*.tar.gz" -o -name "*.zip" -o -name "*.sha256" -o -name "*.json" \) -print0 | \
+            sort -z | \
+            xargs -0 sha256sum > "dist/lensmap-${{ github.ref_name }}-checksums.txt"
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: dist/lensmap-${{ github.ref_name }}-checksums.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: checksums
+          path: dist/lensmap-${{ github.ref_name }}-checksums.txt
+
+  publish:
+    needs: attest
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4

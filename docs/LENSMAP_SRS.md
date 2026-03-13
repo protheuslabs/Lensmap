@@ -462,6 +462,19 @@ This tranche covers:
 - `LM-SRS-045.9` LensMap shall maintain an enterprise runbook covering signing-key changes, retention policy changes, break-glass restore usage, incident evidence recovery, rollback, and compatibility-window enforcement.
 - `LM-SRS-045.10` LensMap shall ship targeted fault and security tests for enterprise evidence flows, including corrupted manifest, corrupted envelope, corrupted artifact, lock contention, interrupted package run, interrupted restore run, and prohibited output path scenarios.
 
+### LM-SRS-046 Supply Chain Integrity and Reproducibility
+
+- `LM-SRS-046.1` LensMap release automation shall publish per-release checksum bundles for all distributable artifacts and provide machine-readable hash manifests.
+- `LM-SRS-046.2` The installer path (shell and PowerShell) shall support checksum enforcement so operators can enable authenticated artifact verification with opt-in controls.
+- `LM-SRS-046.3` Release artifacts shall include platform-specific manifest files with enough metadata for reproducibility replay (version, target, commit, format, hash).
+- `LM-SRS-046.4` Enterprise consumers shall be able to verify download integrity before binary execution without executing installer logic.
+
+### LM-SRS-047 CI and Pipeline Hardening
+
+- `LM-SRS-047.1` LensMap CI shall run formatter, linter, unit tests, and policy gates on every mainline and release branch change.
+- `LM-SRS-047.2` Release and policy checks in CI shall fail closed on non-zero policy violation unless explicitly report-only mode is requested.
+- `LM-SRS-047.3` CI shall produce reusable artifact manifests and checksum outputs alongside any published release artifacts for later audit.
+
 ### LM-SRS-025 Enterprise Onboarding and Fleet Rollout
 
 - LensMap shall support bulk repository onboarding workflows with:
@@ -534,6 +547,8 @@ This tranche covers:
 - LensMap can operate at monorepo scale with parallel execution, resumable checkpoints, and concurrency safety.
 - LensMap can publish/consume structured review-ready artifacts for GitHub/Jira/Azure workflows.
 - Governance can monitor and enforce SLOs, incidents, and release rollback behavior.
+- Release pipelines publish checksum manifests and reproducibility metadata for all distributable binaries.
+- CI runs formatter, lint, tests, and policy gates in hardening mode for release branches.
 - LensMap can enforce enterprise identity mappings and role-based authorization for sensitive operations.
 - LensMap supports centralized policy federation and fleet-wide compliance reporting.
 - LensMap artifacts are signed, provenance-verified, and reproducible across runs with the same policy and source state.

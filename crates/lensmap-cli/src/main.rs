@@ -1035,8 +1035,10 @@ fn hash_text(raw: &str) -> String {
 }
 
 fn parse_redaction_profile(args: &ParsedArgs, key: &str) -> EvidenceRedactionProfile {
-    args.get(key)
-        .map_or(EvidenceRedactionProfile::Debug, EvidenceRedactionProfile::parse)
+    args.get(key).map_or(
+        EvidenceRedactionProfile::Debug,
+        EvidenceRedactionProfile::parse,
+    )
 }
 
 fn file_fingerprint(path: &Path) -> Option<String> {
@@ -1069,7 +1071,12 @@ fn command_policy_hash(policy: &PolicySettings) -> String {
         .unwrap_or_else(|| "unavailable".to_string())
 }
 
-fn command_fingerprint(command: &str, args: &ParsedArgs, inputs: &[String], outputs: &[String]) -> String {
+fn command_fingerprint(
+    command: &str,
+    args: &ParsedArgs,
+    inputs: &[String],
+    outputs: &[String],
+) -> String {
     let mut raw = String::new();
     raw.push_str(command);
     for input in inputs {
@@ -1096,13 +1103,7 @@ fn apply_redaction(value: &mut Value, profile: EvidenceRedactionProfile) {
         EvidenceRedactionProfile::Debug => {}
         EvidenceRedactionProfile::Audit => redact_json_fields(
             value,
-            &[
-                "author",
-                "review_due_at",
-                "source",
-                "signature",
-                "metadata",
-            ],
+            &["author", "review_due_at", "source", "signature", "metadata"],
         ),
         EvidenceRedactionProfile::Operational => redact_json_fields(
             value,
@@ -1154,11 +1155,7 @@ fn redact_json_fields(value: &mut Value, keys: &[&str]) {
     }
 }
 
-fn to_evidence_artifacts(
-    root: &Path,
-    outputs: &[&Path],
-    kind: &str,
-) -> Vec<EvidenceArtifact> {
+fn to_evidence_artifacts(root: &Path, outputs: &[&Path], kind: &str) -> Vec<EvidenceArtifact> {
     outputs
         .iter()
         .filter_map(|path| make_evidence_artifact(root, path, kind))
@@ -1213,17 +1210,23 @@ fn emit_with_envelope(
         finished_at: ts.clone(),
         status: if status_code == 0 { "ok" } else { "failed" }.to_string(),
         status_code,
-        input_artifacts: input_refs.iter().map(|path| EvidenceArtifact {
-            path: path.clone(),
-            kind: "input".to_string(),
-            hash: "".to_string(),
-            bytes: 0,
-        }).collect(),
+        input_artifacts: input_refs
+            .iter()
+            .map(|path| EvidenceArtifact {
+                path: path.clone(),
+                kind: "input".to_string(),
+                hash: "".to_string(),
+                bytes: 0,
+            })
+            .collect(),
         output_artifacts,
         errors,
     };
     if let Some(obj) = out_value.as_object_mut() {
-        obj.insert("receipt".to_string(), serde_json::to_value(receipt).unwrap_or_else(|_| json!({})));
+        obj.insert(
+            "receipt".to_string(),
+            serde_json::to_value(receipt).unwrap_or_else(|_| json!({})),
+        );
     }
     if let Some(bundle_dir) = out_value
         .get("bundle_dir")
@@ -1865,7 +1868,9 @@ fn save_package_manifest(
     bundle_dir: &str,
 ) {
     manifest.updated_at = now_iso();
-    manifest.items.sort_by(|left, right| left.original_path.cmp(&right.original_path));
+    manifest
+        .items
+        .sort_by(|left, right| left.original_path.cmp(&right.original_path));
     let manifest = normalize_package_manifest(manifest, root, bundle_dir);
     ensure_dir(path);
     let _ = fs::write(
@@ -2378,7 +2383,8 @@ fn strip_markers_from_line(
         if let Some(anchor) = parse_anchor_line(&current) {
             anchors_removed = 1;
             if anchor.is_inline {
-                if let Some(idx) = find_line_comment_index_outside_strings(&current, &anchor.marker) {
+                if let Some(idx) = find_line_comment_index_outside_strings(&current, &anchor.marker)
+                {
                     current = current[..idx].trim_end().to_string();
                 } else {
                     current.clear();
@@ -2405,7 +2411,9 @@ fn strip_markers_from_line(
         }
         if !removed {
             if let Some(ref_match) = parse_ref_in_line(&current) {
-                if let Some(idx) = find_line_comment_index_outside_strings(&current, &ref_match.marker) {
+                if let Some(idx) =
+                    find_line_comment_index_outside_strings(&current, &ref_match.marker)
+                {
                     refs_removed = 1;
                     let prefix = current[..idx].trim_end().to_string();
                     current = prefix;
@@ -5856,7 +5864,8 @@ fn cmd_strip(root: &Path, args: &ParsedArgs) {
         );
     }
 
-    let (files, missing_sources) = collect_source_files_for_strip(root, &sources, &exclude_patterns);
+    let (files, missing_sources) =
+        collect_source_files_for_strip(root, &sources, &exclude_patterns);
     if files.is_empty() {
         emit(
             json!({
@@ -5968,7 +5977,14 @@ fn cmd_strip(root: &Path, args: &ParsedArgs) {
         "ts": now_iso(),
     });
     append_history(root, &out);
-    emit(out, if check_only && summary.marker_hits > 0 { 1 } else { 0 });
+    emit(
+        out,
+        if check_only && summary.marker_hits > 0 {
+            1
+        } else {
+            0
+        },
+    );
 }
 
 fn package_stripped_sources(
@@ -6039,7 +6055,8 @@ fn package_stripped_sources(
             production.strip_refs
         },
     );
-    let (files, missing_sources) = collect_source_files_for_strip(root, &sources, &exclude_patterns);
+    let (files, missing_sources) =
+        collect_source_files_for_strip(root, &sources, &exclude_patterns);
     if files.is_empty() {
         emit(
             json!({
@@ -8150,11 +8167,8 @@ fn cmd_policy_init(root: &Path, args: &ParsedArgs) {
     {
         policy.required_patterns = split_csv(Some(raw));
     }
-    production.strip_anchors = bool_from_flag(
-        args,
-        "production-strip-anchors",
-        production.strip_anchors,
-    );
+    production.strip_anchors =
+        bool_from_flag(args, "production-strip-anchors", production.strip_anchors);
     production.strip_refs = bool_from_flag(args, "production-strip-refs", production.strip_refs);
     production.strip_on_package = bool_from_flag(
         args,
@@ -9580,16 +9594,7 @@ fn annotation_has_candidate_signal(text: &str) -> bool {
         return false;
     }
     [
-        "todo",
-        "fixme",
-        "warning",
-        "risk",
-        "hack",
-        "issue",
-        "review",
-        "TODO",
-        "FIXME",
-        "NOTE",
+        "todo", "fixme", "warning", "risk", "hack", "issue", "review", "TODO", "FIXME", "NOTE",
         "NOTE:",
     ]
     .iter()
@@ -9761,7 +9766,11 @@ fn cmd_metrics(root: &Path, args: &ParsedArgs) {
     }
 
     let period = args.get("period").unwrap_or("run").trim();
-    let top = args.get("top").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100);
+    let top = args
+        .get("top")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 100);
     let generated_at = now_iso();
     let snapshot = build_metric_snapshot(root, &lensmaps, top, period, &generated_at);
 
@@ -9819,7 +9828,11 @@ fn cmd_scorecard(root: &Path, args: &ParsedArgs) {
     }
 
     let period = args.get("period").unwrap_or("run").trim();
-    let top = args.get("top").and_then(|raw| raw.parse::<usize>().ok()).unwrap_or(10).clamp(1, 100);
+    let top = args
+        .get("top")
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(10)
+        .clamp(1, 100);
     let generated_at = now_iso();
     let snapshot = build_metric_snapshot(root, &lensmaps, top, period, &generated_at);
     let out_path = args
@@ -9877,13 +9890,11 @@ fn resolve_import_source_files(root: &Path, raw: &str, fallback_covers: &[String
     resolve_covers_to_files(root, fallback_covers)
 }
 
-fn render_scorecard_markdown(
-    title: &str,
-    snapshot: &Value,
-    health: &Value,
-    rows: usize,
-) -> String {
-    let period = snapshot.get("period").and_then(Value::as_str).unwrap_or("run");
+fn render_scorecard_markdown(title: &str, snapshot: &Value, health: &Value, rows: usize) -> String {
+    let period = snapshot
+        .get("period")
+        .and_then(Value::as_str)
+        .unwrap_or("run");
     let generated_at = snapshot
         .get("generated_at")
         .and_then(Value::as_str)
@@ -9898,18 +9909,9 @@ fn render_scorecard_markdown(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    let totals = snapshot
-        .get("totals")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let stats = snapshot
-        .get("stats")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
-    let policy = snapshot
-        .get("policy")
-        .cloned()
-        .unwrap_or_else(|| json!({}));
+    let totals = snapshot.get("totals").cloned().unwrap_or_else(|| json!({}));
+    let stats = snapshot.get("stats").cloned().unwrap_or_else(|| json!({}));
+    let policy = snapshot.get("policy").cloned().unwrap_or_else(|| json!({}));
     let policy_findings = snapshot
         .get("policy_findings")
         .cloned()
@@ -9994,7 +9996,10 @@ fn render_scorecard_markdown(
     lines.push("## Policy".to_string());
     lines.push(format!(
         "- Policy checks: {} checks | {} errors | {} warnings",
-        totals.get("policy_checks").and_then(Value::as_u64).unwrap_or(0),
+        totals
+            .get("policy_checks")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
         policy_errors,
         policy_warnings,
     ));
@@ -10023,7 +10028,10 @@ fn render_scorecard_markdown(
         lines.push(format!("- Require owner: {}", require_owner));
         lines.push(format!("- Require author: {}", require_author));
         lines.push(format!("- Require template: {}", require_template));
-        lines.push(format!("- Require review status: {}", require_review_status));
+        lines.push(format!(
+            "- Require review status: {}",
+            require_review_status
+        ));
     }
     lines.push(String::new());
 
@@ -10049,7 +10057,10 @@ fn render_scorecard_markdown(
             continue;
         }
         for item in rows_value.iter().take(rows.max(1)) {
-            let name = item.get("name").and_then(Value::as_str).unwrap_or("unknown");
+            let name = item
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             let count = item.get("count").and_then(Value::as_u64).unwrap_or(0);
             lines.push(format!("- `{}`: {}", name, count));
         }
@@ -10062,7 +10073,10 @@ fn render_scorecard_markdown(
             lines.push("- none".to_string());
         } else {
             for item in distribution.iter() {
-                let bucket = item.get("bucket").and_then(Value::as_str).unwrap_or("unknown");
+                let bucket = item
+                    .get("bucket")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
                 let count = item.get("count").and_then(Value::as_u64).unwrap_or(0);
                 let share = item.get("share").and_then(Value::as_f64).unwrap_or(0.0);
                 lines.push(format!("- {}: {} ({:.2}%)", bucket, count, share));
@@ -10076,7 +10090,10 @@ fn render_scorecard_markdown(
     if let Some(obj) = health.as_object() {
         let row_limit = rows.max(1).min(obj.len());
         for (key, item) in obj.iter().take(row_limit) {
-            let status = item.get("status").and_then(Value::as_str).unwrap_or("unknown");
+            let status = item
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
             let value = item.get("value").and_then(Value::as_f64).unwrap_or(0.0);
             let green = item.get("green").and_then(Value::as_f64).unwrap_or(0.0);
             let yellow = item.get("yellow").and_then(Value::as_f64).unwrap_or(0.0);
@@ -10186,12 +10203,14 @@ fn cmd_autobot(root: &Path, args: &ParsedArgs) {
     for item in &accepted {
         simulation.entries.push(item.entry.clone());
     }
-    let (policy, errors, warnings, _) =
-        collect_aggregated_policy_findings(root, &[LoadedLensMapDoc {
+    let (policy, errors, warnings, _) = collect_aggregated_policy_findings(
+        root,
+        &[LoadedLensMapDoc {
             lensmap: normalize_relative(root, &lensmap_path),
             path: lensmap_path.clone(),
             doc: simulation.clone(),
-        }]);
+        }],
+    );
     let policy_failure_count = errors.len() + warnings.len();
     let mut policy_failures = vec![];
     for item in errors.iter().chain(warnings.iter()) {
@@ -10303,7 +10322,16 @@ fn cmd_autobot(root: &Path, args: &ParsedArgs) {
         ),
     );
     append_history(root, &out);
-    emit(out, if applied { 0 } else if strict_policy && policy_failure_count > 0 { 1 } else { 0 });
+    emit(
+        out,
+        if applied {
+            0
+        } else if strict_policy && policy_failure_count > 0 {
+            1
+        } else {
+            0
+        },
+    );
 }
 
 fn cmd_import(root: &Path, args: &ParsedArgs) {
@@ -10926,8 +10954,8 @@ fn load_repo_lensmap_docs(root: &Path, lensmaps: &[String]) -> Vec<LoadedLensMap
                 path: path.clone(),
                 doc: load_doc(&path, "group"),
             })
-    })
-    .collect()
+        })
+        .collect()
 }
 
 fn read_history_rows(root: &Path, path: &Path) -> Vec<Value> {
@@ -10954,11 +10982,14 @@ fn read_history_rows(root: &Path, path: &Path) -> Vec<Value> {
 }
 
 fn as_f64_or_default(value: &Value) -> Option<f64> {
-    value.as_f64().or_else(|| value.as_u64().map(|v| v as f64)).or_else(|| {
-        value
-            .as_i64()
-            .and_then(|v| if v >= 0 { Some(v as f64) } else { None })
-    })
+    value
+        .as_f64()
+        .or_else(|| value.as_u64().map(|v| v as f64))
+        .or_else(|| {
+            value
+                .as_i64()
+                .and_then(|v| if v >= 0 { Some(v as f64) } else { None })
+        })
 }
 
 fn entry_record_from_search_entry(entry: &SearchEntryRecord) -> EntryRecord {
@@ -11055,7 +11086,13 @@ fn latest_metric_rates(root: &Path, period: &str) -> BTreeMap<String, f64> {
     latest_rates
 }
 
-fn append_metric_history(root: &Path, period: &str, generated_at: &str, metrics: &Value, out_path: &Path) {
+fn append_metric_history(
+    root: &Path,
+    period: &str,
+    generated_at: &str,
+    metrics: &Value,
+    out_path: &Path,
+) {
     let history_path = default_metric_history_path(root);
     ensure_dir(&history_path);
     let row = json!({
@@ -11092,8 +11129,7 @@ fn build_metric_snapshot(
         .iter()
         .map(|loaded| (loaded.lensmap.clone(), policy_for_doc(&loaded.doc)))
         .collect::<Vec<_>>();
-    let (policy, errors, warnings, _) =
-        collect_aggregated_policy_findings(root, &loaded_docs);
+    let (policy, errors, warnings, _) = collect_aggregated_policy_findings(root, &loaded_docs);
     let entries = collect_repo_search_entries(root, lensmaps);
     let stats = summary_stats(&entries, policy.stale_after_days);
 
@@ -11113,7 +11149,12 @@ fn build_metric_snapshot(
         {
             orphan_notes = orphan_notes.saturating_add(1);
         }
-        if entry_record.owner.as_ref().map(|value| value.trim().is_empty()).unwrap_or(true) {
+        if entry_record
+            .owner
+            .as_ref()
+            .map(|value| value.trim().is_empty())
+            .unwrap_or(true)
+        {
             unowned_notes = unowned_notes.saturating_add(1);
         }
 
@@ -11159,22 +11200,34 @@ fn build_metric_snapshot(
         build_metric_rate_row(
             "note_coverage_rate",
             note_coverage_rate,
-            &metric_rate_trend(note_coverage_rate, previous_rates.get("note_coverage_rate").copied()),
+            &metric_rate_trend(
+                note_coverage_rate,
+                previous_rates.get("note_coverage_rate").copied(),
+            ),
         ),
         build_metric_rate_row(
             "stale_note_ratio",
             stale_note_ratio,
-            &metric_rate_trend(stale_note_ratio, previous_rates.get("stale_note_ratio").copied()),
+            &metric_rate_trend(
+                stale_note_ratio,
+                previous_rates.get("stale_note_ratio").copied(),
+            ),
         ),
         build_metric_rate_row(
             "orphan_notes_rate",
             orphan_notes_rate,
-            &metric_rate_trend(orphan_notes_rate, previous_rates.get("orphan_notes_rate").copied()),
+            &metric_rate_trend(
+                orphan_notes_rate,
+                previous_rates.get("orphan_notes_rate").copied(),
+            ),
         ),
         build_metric_rate_row(
             "no_owner_notes_rate",
             no_owner_notes_rate,
-            &metric_rate_trend(no_owner_notes_rate, previous_rates.get("no_owner_notes_rate").copied()),
+            &metric_rate_trend(
+                no_owner_notes_rate,
+                previous_rates.get("no_owner_notes_rate").copied(),
+            ),
         ),
         build_metric_rate_row(
             "reviewed_rate",
@@ -11192,7 +11245,10 @@ fn build_metric_snapshot(
         build_metric_rate_row(
             "policy_pass_rate",
             policy_pass_rate,
-            &metric_rate_trend(policy_pass_rate, previous_rates.get("policy_pass_rate").copied()),
+            &metric_rate_trend(
+                policy_pass_rate,
+                previous_rates.get("policy_pass_rate").copied(),
+            ),
         ),
     ];
 
