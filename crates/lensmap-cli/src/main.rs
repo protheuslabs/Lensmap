@@ -5,8 +5,9 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
+use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Component, Path, PathBuf};
@@ -915,6 +916,10 @@ fn localized_action_message(action: &str) -> Option<String> {
         "status" => tr("Status collected.", "状态已收集。"),
         "metrics" => tr("LensMap metrics generated.", "LensMap 指标已生成。"),
         "scorecard" => tr("LensMap scorecard generated.", "LensMap 评分卡已生成。"),
+        "public_health" => tr("LensMap public health generated.", "LensMap 公共健康报告已生成。"),
+        "command_parity" => tr("LensMap command parity checked.", "LensMap 命令一致性检查已完成。"),
+        "release_manifest" => tr("LensMap release manifest generated.", "LensMap 发布清单已生成。"),
+        "release_preflight" => tr("LensMap release preflight completed.", "LensMap 发布预检已完成。"),
         _ => return None,
     };
     Some(message)
@@ -1027,11 +1032,25 @@ fn split_csv(raw: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+fn bool_flag(raw: Option<&str>, fallback: bool) -> bool {
+    match raw.map(|v| v.trim().to_ascii_lowercase()) {
+        Some(v) if matches!(v.as_str(), "1" | "true" | "yes" | "on") => true,
+        Some(v) if matches!(v.as_str(), "0" | "false" | "no" | "off") => false,
+        _ => fallback,
+    }
+}
+
 fn hash_text(raw: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(raw.as_bytes());
     let hex = hex::encode(hasher.finalize());
     hex[..12].to_string()
+}
+
+fn hash_bytes(raw: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(raw);
+    hex::encode(hasher.finalize())
 }
 
 fn parse_redaction_profile(args: &ParsedArgs, key: &str) -> EvidenceRedactionProfile {
@@ -2069,6 +2088,125 @@ fn is_release_ref_context() -> bool {
     ref_value.starts_with("refs/tags/v")
         || ref_value.starts_with("refs/heads/release/")
         || ref_value.starts_with("release/")
+}
+
+fn lensmap_command_registry() -> Vec<String> {
+    [
+        "init",
+        "annotate",
+        "template add",
+        "template list",
+        "scan",
+        "extract-comments",
+        "unmerge",
+        "merge",
+        "package",
+        "package evidence",
+        "strip",
+        "unpackage",
+        "restore",
+        "verify",
+        "validate",
+        "policy init",
+        "policy check",
+        "reanchor",
+        "render",
+        "parse",
+        "show",
+        "simplify",
+        "index",
+        "search",
+        "summary",
+        "metrics",
+        "scorecard",
+        "pr report",
+        "polish",
+        "import",
+        "sync",
+        "expose",
+        "status",
+        "public-health",
+        "command parity",
+        "release manifest",
+        "release preflight",
+    ]
+    .iter()
+    .map(|entry| (*entry).to_string())
+    .collect()
+}
+
+fn canonical_lensmap_doc_command(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("lensmap ") {
+        return None;
+    }
+    let command_text = trimmed
+        .split("  #")
+        .next()
+        .unwrap_or(trimmed)
+        .trim()
+        .to_ascii_lowercase();
+    let tokens = command_text
+        .split_whitespace()
+        .skip(1)
+        .collect::<Vec<_>>();
+    if tokens.is_empty() {
+        return None;
+    }
+    let first = tokens[0];
+    if first.starts_with("--") {
+        return None;
+    }
+    let two_token = matches!(
+        first,
+        "template" | "package" | "policy" | "pr" | "command" | "release"
+    ) && tokens
+        .get(1)
+        .map(|token| !token.starts_with("--"))
+        .unwrap_or(false);
+    let command = if two_token {
+        format!("{first} {}", tokens[1])
+    } else {
+        first.to_string()
+    };
+    Some(command)
+}
+
+fn documented_commands_from_markdown(body: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for line in body.lines() {
+        if let Some(command) = canonical_lensmap_doc_command(line) {
+            out.insert(command);
+        }
+    }
+    out
+}
+
+fn default_lensmap_doc_paths(root: &Path) -> Vec<PathBuf> {
+    let app_root = root.join("apps").join("lensmap");
+    if app_root.join("README.md").exists() {
+        return vec![app_root.join("README.md"), app_root.join("README.zh-CN.md")];
+    }
+    vec![root.join("README.md"), root.join("README.zh-CN.md")]
+}
+
+fn workflow_files(root: &Path, override_dir: Option<&str>) -> Vec<PathBuf> {
+    let candidate = override_dir
+        .map(|rel| resolve_from_root(root, rel))
+        .unwrap_or_else(|| root.join(".github").join("workflows"));
+    let Ok(read_dir) = fs::read_dir(candidate) else {
+        return Vec::new();
+    };
+    read_dir
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(OsStr::to_str)
+                .map(|ext| matches!(ext.to_ascii_lowercase().as_str(), "yml" | "yaml"))
+                .unwrap_or(false)
+        })
+        .collect::<Vec<_>>()
 }
 
 fn parse_diff_hunks(diff: &str) -> Vec<GitHunk> {
@@ -9004,6 +9142,22 @@ fn default_metric_history_path(root: &Path) -> PathBuf {
     root.join("local/state/ops/lensmap/metric-history.jsonl")
 }
 
+fn default_command_parity_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/command-parity.json")
+}
+
+fn default_release_manifest_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/release-manifest.json")
+}
+
+fn default_release_preflight_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/release-preflight.json")
+}
+
+fn default_public_health_output_path(root: &Path) -> PathBuf {
+    root.join("local/state/ops/lensmap/public-health.json")
+}
+
 fn render_filters_from_args<'a>(args: &'a ParsedArgs) -> RenderFilters<'a> {
     RenderFilters {
         file: args.get("file"),
@@ -10927,6 +11081,570 @@ fn cmd_status(root: &Path, args: &ParsedArgs) {
     );
 }
 
+fn parse_docs_paths(root: &Path, args: &ParsedArgs) -> Vec<PathBuf> {
+    if let Some(raw) = args.get("docs") {
+        let explicit = split_csv(Some(raw))
+            .into_iter()
+            .map(|doc| resolve_from_root(root, &doc))
+            .collect::<Vec<_>>();
+        if !explicit.is_empty() {
+            return explicit;
+        }
+    }
+    default_lensmap_doc_paths(root)
+}
+
+fn command_parity_payload(root: &Path, args: &ParsedArgs) -> Value {
+    let docs = parse_docs_paths(root, args);
+    let registry = lensmap_command_registry();
+    let registry_set = registry.iter().cloned().collect::<BTreeSet<_>>();
+    let mut documented = BTreeSet::new();
+    let mut missing_docs = Vec::new();
+    for path in &docs {
+        match fs::read_to_string(path) {
+            Ok(body) => {
+                for command in documented_commands_from_markdown(&body) {
+                    documented.insert(command);
+                }
+            }
+            Err(_) => {
+                missing_docs.push(normalize_relative(root, path));
+            }
+        }
+    }
+    let missing_in_docs = registry_set
+        .difference(&documented)
+        .cloned()
+        .collect::<Vec<_>>();
+    let stale_in_docs = documented
+        .difference(&registry_set)
+        .cloned()
+        .collect::<Vec<_>>();
+    let ok = missing_docs.is_empty() && missing_in_docs.is_empty() && stale_in_docs.is_empty();
+    json!({
+        "ok": ok,
+        "type": "lensmap",
+        "action": "command_parity",
+        "ts": now_iso(),
+        "registry_commands": registry,
+        "documented_commands": documented.into_iter().collect::<Vec<_>>(),
+        "docs_checked": docs.iter().map(|path| normalize_relative(root, path)).collect::<Vec<_>>(),
+        "missing_docs": missing_docs,
+        "missing_in_docs": missing_in_docs,
+        "stale_in_docs": stale_in_docs,
+        "claim_evidence": [{
+            "id": "V4-LENS-008",
+            "claim": "lensmap_cli_registry_and_docs_are_kept_in_deterministic_parity",
+            "evidence": {
+                "missing_in_docs": missing_in_docs.len(),
+                "stale_in_docs": stale_in_docs.len()
+            }
+        }]
+    })
+}
+
+fn cmd_command_parity(root: &Path, args: &ParsedArgs) {
+    let out = command_parity_payload(root, args);
+    let out_path = args
+        .get("out")
+        .map(|raw| resolve_from_root(root, raw))
+        .unwrap_or_else(|| default_command_parity_output_path(root));
+    ensure_dir(&out_path);
+    let _ = fs::write(
+        &out_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+    let mut final_out = out;
+    if let Some(obj) = final_out.as_object_mut() {
+        obj.insert(
+            "output_path".to_string(),
+            Value::String(normalize_relative(root, &out_path)),
+        );
+    }
+    append_history(root, &final_out);
+    let code = if final_out.get("ok").and_then(Value::as_bool) == Some(true) {
+        0
+    } else {
+        1
+    };
+    emit(final_out, code);
+}
+
+fn resolve_lensmap_app_root(root: &Path) -> PathBuf {
+    let app_root = root.join("apps").join("lensmap");
+    if app_root.join("README.md").exists() {
+        return app_root;
+    }
+    root.to_path_buf()
+}
+
+fn resolve_lensmap_artifacts_dir(root: &Path, args: &ParsedArgs) -> PathBuf {
+    if let Some(raw) = args.get("artifacts-dir") {
+        return resolve_from_root(root, raw);
+    }
+    let app_root = resolve_lensmap_app_root(root);
+    let app_artifacts = app_root.join("artifacts");
+    if app_artifacts.exists() {
+        return app_artifacts;
+    }
+    root.join("artifacts")
+}
+
+fn release_tag(args: &ParsedArgs) -> String {
+    let raw = args
+        .get("version")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(COMMAND_VERSION)
+        .to_ascii_lowercase();
+    if raw.starts_with('v') {
+        raw
+    } else {
+        format!("v{raw}")
+    }
+}
+
+fn release_artifact_rows(artifacts_dir: &Path, tag: &str) -> Vec<Value> {
+    let Ok(read_dir) = fs::read_dir(artifacts_dir) else {
+        return Vec::new();
+    };
+    let version = tag.trim_start_matches('v');
+    let mut rows = Vec::new();
+    for entry in read_dir.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .and_then(OsStr::to_str)
+            .unwrap_or("")
+            .to_string();
+        let ext = path.extension().and_then(OsStr::to_str).unwrap_or("");
+        if !matches!(ext, "vsix" | "zip" | "gz" | "tar") {
+            continue;
+        }
+        if !name.contains(version) && !name.contains(tag) {
+            continue;
+        }
+        let bytes = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+        let hash = fs::read(&path)
+            .ok()
+            .map(|buf| hash_bytes(&buf))
+            .unwrap_or_default();
+        rows.push(json!({
+            "name": name,
+            "path": path.to_string_lossy().to_string(),
+            "size_bytes": bytes,
+            "sha256": hash
+        }));
+    }
+    rows.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .cmp(right.get("name").and_then(Value::as_str).unwrap_or(""))
+    });
+    rows
+}
+
+fn checksum_index(artifacts_dir: &Path) -> BTreeMap<String, String> {
+    let Ok(read_dir) = fs::read_dir(artifacts_dir) else {
+        return BTreeMap::new();
+    };
+    let mut out = BTreeMap::new();
+    for entry in read_dir.filter_map(Result::ok) {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path.file_name().and_then(OsStr::to_str).unwrap_or("");
+        if !(name.ends_with(".sha256")
+            || name.ends_with(".sha256sum")
+            || name.contains("checksums"))
+        {
+            continue;
+        }
+        let body = fs::read_to_string(&path).unwrap_or_default();
+        for line in body.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let parts = trimmed.split_whitespace().collect::<Vec<_>>();
+            if parts.len() < 2 {
+                continue;
+            }
+            let hash = parts[0].to_ascii_lowercase();
+            let file = parts[1]
+                .trim_start_matches('*')
+                .trim_start_matches("./")
+                .to_string();
+            if !file.is_empty() {
+                out.insert(file, hash);
+            }
+        }
+    }
+    out
+}
+
+fn release_manifest_payload(root: &Path, args: &ParsedArgs) -> Value {
+    let tag = release_tag(args);
+    let strict = bool_flag(args.get("strict"), true);
+    let require_remote = bool_flag(args.get("check-remote"), false);
+    let app_root = resolve_lensmap_app_root(root);
+    let artifacts_dir = resolve_lensmap_artifacts_dir(root, args);
+    let artifacts = release_artifact_rows(&artifacts_dir, &tag);
+    let checksums = checksum_index(&artifacts_dir);
+    let artifacts_missing_checksums = artifacts
+        .iter()
+        .filter_map(|row| row.get("name").and_then(Value::as_str))
+        .filter(|name| !checksums.contains_key(*name))
+        .map(|name| name.to_string())
+        .collect::<Vec<_>>();
+    let local_tag_exists = git_output(root, &["tag", "--list", &tag])
+        .map(|rows| rows.lines().any(|line| line.trim() == tag))
+        .unwrap_or(false);
+    let remote_tag_exists = if require_remote {
+        git_output(root, &["ls-remote", "--tags", "origin", &format!("refs/tags/{tag}")])
+            .map(|rows| !rows.trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+
+    let docs_to_scan = [
+        app_root.join("README.md"),
+        app_root.join("scripts").join("install.sh"),
+        app_root.join("scripts").join("install.ps1"),
+    ];
+    let mut docs_missing = Vec::new();
+    let mut docs_without_tag = Vec::new();
+    for path in docs_to_scan {
+        if !path.exists() {
+            docs_missing.push(normalize_relative(root, &path));
+            continue;
+        }
+        let body = fs::read_to_string(&path).unwrap_or_default().to_ascii_lowercase();
+        let version = tag.trim_start_matches('v');
+        if !body.contains(&tag) && !body.contains(version) {
+            docs_without_tag.push(normalize_relative(root, &path));
+        }
+    }
+
+    let ok = !artifacts.is_empty()
+        && artifacts_missing_checksums.is_empty()
+        && local_tag_exists
+        && remote_tag_exists
+        && docs_missing.is_empty()
+        && docs_without_tag.is_empty();
+    let mut remediation = Vec::new();
+    if artifacts.is_empty() {
+        remediation.push("publish_versioned_artifacts".to_string());
+    }
+    if !artifacts_missing_checksums.is_empty() {
+        remediation.push("generate_checksums_for_all_release_artifacts".to_string());
+    }
+    if !local_tag_exists || !remote_tag_exists {
+        remediation.push("publish_release_tag".to_string());
+    }
+    if !docs_without_tag.is_empty() {
+        remediation.push("update_install_docs_and_scripts_to_release_tag".to_string());
+    }
+    if !docs_missing.is_empty() {
+        remediation.push("restore_missing_release_surface_files".to_string());
+    }
+
+    let manifest = json!({
+        "version_tag": tag,
+        "strict": strict,
+        "artifacts_dir": normalize_relative(root, &artifacts_dir),
+        "artifact_count": artifacts.len(),
+        "artifacts": artifacts,
+        "checksum_index_size": checksums.len(),
+        "artifacts_missing_checksums": artifacts_missing_checksums,
+        "tag_local_exists": local_tag_exists,
+        "tag_remote_exists": remote_tag_exists,
+        "docs_missing": docs_missing,
+        "docs_without_tag": docs_without_tag,
+        "remediation": remediation,
+    });
+    let manifest_hash = hash_text(
+        &serde_json::to_string(&manifest).unwrap_or_else(|_| "{}".to_string()),
+    );
+    let manifest_signature = hash_text(&format!("lensmap_release_manifest_v1:{manifest_hash}"));
+    json!({
+        "ok": if strict { ok } else { true },
+        "type": "lensmap",
+        "action": "release_manifest",
+        "ts": now_iso(),
+        "manifest": manifest,
+        "manifest_hash": manifest_hash,
+        "manifest_signature": manifest_signature,
+        "claim_evidence": [{
+            "id": "V4-LENS-009",
+            "claim": "release_artifacts_are_tag_bound_checksum_verified_and_doc_link_consistent",
+            "evidence": {
+                "tag": tag,
+                "artifacts": artifacts.len(),
+                "missing_checksums": artifacts_missing_checksums.len()
+            }
+        }]
+    })
+}
+
+fn cmd_release_manifest(root: &Path, args: &ParsedArgs) {
+    let out = release_manifest_payload(root, args);
+    let out_path = args
+        .get("out")
+        .map(|raw| resolve_from_root(root, raw))
+        .unwrap_or_else(|| default_release_manifest_output_path(root));
+    ensure_dir(&out_path);
+    let _ = fs::write(
+        &out_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+    let mut final_out = out;
+    if let Some(obj) = final_out.as_object_mut() {
+        obj.insert(
+            "output_path".to_string(),
+            Value::String(normalize_relative(root, &out_path)),
+        );
+    }
+    append_history(root, &final_out);
+    let code = if final_out.get("ok").and_then(Value::as_bool) == Some(true) {
+        0
+    } else {
+        1
+    };
+    emit(final_out, code);
+}
+
+fn release_preflight_payload(root: &Path, args: &ParsedArgs) -> Value {
+    let strict = bool_flag(args.get("strict"), true);
+    let workflow_dir = args.get("workflows-dir");
+    let workflows = workflow_files(root, workflow_dir);
+    let mut yaml_errors = Vec::new();
+    let mut production_gate_workflow = false;
+    for workflow in &workflows {
+        let rel = normalize_relative(root, workflow);
+        match fs::read_to_string(workflow) {
+            Ok(body) => {
+                if body.to_ascii_lowercase().contains("production-gate")
+                    || workflow
+                        .file_name()
+                        .and_then(OsStr::to_str)
+                        .map(|name| name.to_ascii_lowercase().contains("production"))
+                        .unwrap_or(false)
+                {
+                    production_gate_workflow = true;
+                }
+                if let Err(err) = serde_yaml::from_str::<serde_yaml::Value>(&body) {
+                    yaml_errors.push(format!("{rel}:{err}"));
+                }
+            }
+            Err(err) => yaml_errors.push(format!("{rel}:read_failed:{err}")),
+        }
+    }
+    let run_smoke = bool_flag(args.get("smoke"), true);
+    let mut smoke_ok = true;
+    let mut smoke_detail = String::new();
+    if run_smoke {
+        let manifest_path = if root.join("apps/lensmap/Cargo.toml").exists() {
+            root.join("apps/lensmap/Cargo.toml")
+        } else {
+            root.join("Cargo.toml")
+        };
+        let output = Command::new("cargo")
+            .arg("check")
+            .arg("--quiet")
+            .arg("--manifest-path")
+            .arg(manifest_path)
+            .current_dir(root)
+            .output();
+        match output {
+            Ok(result) => {
+                smoke_ok = result.status.success();
+                if !smoke_ok {
+                    smoke_detail = String::from_utf8_lossy(&result.stderr).trim().to_string();
+                }
+            }
+            Err(err) => {
+                smoke_ok = false;
+                smoke_detail = format!("smoke_command_failed:{err}");
+            }
+        }
+    }
+    let ok = !workflows.is_empty() && yaml_errors.is_empty() && production_gate_workflow && smoke_ok;
+    let revert_notes = if ok {
+        Vec::<String>::new()
+    } else {
+        let mut notes = Vec::new();
+        if workflows.is_empty() {
+            notes.push("missing_workflows".to_string());
+        }
+        if !production_gate_workflow {
+            notes.push("missing_production_gate_workflow".to_string());
+        }
+        if !yaml_errors.is_empty() {
+            notes.push("invalid_workflow_yaml".to_string());
+        }
+        if !smoke_ok {
+            notes.push("production_gate_smoke_failed".to_string());
+        }
+        notes
+    };
+    json!({
+        "ok": if strict { ok } else { true },
+        "type": "lensmap",
+        "action": "release_preflight",
+        "ts": now_iso(),
+        "strict": strict,
+        "workflows": workflows.iter().map(|path| normalize_relative(root, path)).collect::<Vec<_>>(),
+        "yaml_errors": yaml_errors,
+        "production_gate_workflow": production_gate_workflow,
+        "smoke_executed": run_smoke,
+        "smoke_ok": smoke_ok,
+        "smoke_detail": smoke_detail,
+        "revert_notes": revert_notes,
+        "claim_evidence": [{
+            "id": "V4-LENS-010",
+            "claim": "release_workflows_are_yaml_validated_preflight_smoked_and_fail_closed_before_merge",
+            "evidence": {
+                "workflows": workflows.len(),
+                "yaml_errors": yaml_errors.len(),
+                "smoke_ok": smoke_ok
+            }
+        }]
+    })
+}
+
+fn cmd_release_preflight(root: &Path, args: &ParsedArgs) {
+    let out = release_preflight_payload(root, args);
+    let out_path = args
+        .get("out")
+        .map(|raw| resolve_from_root(root, raw))
+        .unwrap_or_else(|| default_release_preflight_output_path(root));
+    ensure_dir(&out_path);
+    let _ = fs::write(
+        &out_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+
+    if out.get("ok").and_then(Value::as_bool) == Some(false) {
+        let note_path = root.join("local/state/ops/lensmap/release-revert-notes.md");
+        ensure_dir(&note_path);
+        let notes = out
+            .get("revert_notes")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|row| format!("- {row}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = format!(
+            "# LensMap Release Revert Notes\n\nGenerated: {}\n\n{}\n",
+            now_iso(),
+            notes
+        );
+        let _ = fs::write(note_path, body);
+    }
+
+    let mut final_out = out;
+    if let Some(obj) = final_out.as_object_mut() {
+        obj.insert(
+            "output_path".to_string(),
+            Value::String(normalize_relative(root, &out_path)),
+        );
+    }
+    append_history(root, &final_out);
+    let code = if final_out.get("ok").and_then(Value::as_bool) == Some(true) {
+        0
+    } else {
+        1
+    };
+    emit(final_out, code);
+}
+
+fn public_health_payload(root: &Path, args: &ParsedArgs) -> Value {
+    let strict = bool_flag(args.get("strict"), true);
+    let branch = git_output(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .unwrap_or_else(|| "unknown".to_string());
+    let dirty_files = git_worktree_changed_files(root);
+    let on_mainline = branch == "main" || branch.starts_with("release/");
+    let command_parity = command_parity_payload(root, args);
+    let release_manifest = release_manifest_payload(root, args);
+    let release_preflight = release_preflight_payload(root, args);
+    let ok = on_mainline
+        && dirty_files.is_empty()
+        && command_parity.get("ok").and_then(Value::as_bool) == Some(true)
+        && release_manifest.get("ok").and_then(Value::as_bool) == Some(true)
+        && release_preflight.get("ok").and_then(Value::as_bool) == Some(true);
+    json!({
+        "ok": if strict { ok } else { true },
+        "type": "lensmap",
+        "action": "public_health",
+        "ts": now_iso(),
+        "strict": strict,
+        "branch": branch,
+        "on_mainline": on_mainline,
+        "dirty_files": dirty_files,
+        "merge_gate_clean": dirty_files.is_empty(),
+        "release_manifest": release_manifest,
+        "command_parity": command_parity,
+        "release_preflight": release_preflight,
+        "claim_evidence": [{
+            "id": "V4-LENS-007",
+            "claim": "public_release_health_gate_blocks_promotion_on_merge_release_or_artifact_failures",
+            "evidence": {
+                "on_mainline": on_mainline,
+                "dirty_files": dirty_files.len()
+            }
+        }]
+    })
+}
+
+fn cmd_public_health(root: &Path, args: &ParsedArgs) {
+    let out = public_health_payload(root, args);
+    let out_path = args
+        .get("out")
+        .map(|raw| resolve_from_root(root, raw))
+        .unwrap_or_else(|| default_public_health_output_path(root));
+    ensure_dir(&out_path);
+    let _ = fs::write(
+        &out_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&out).unwrap_or_else(|_| "{}".to_string())
+        ),
+    );
+    let mut final_out = out;
+    if let Some(obj) = final_out.as_object_mut() {
+        obj.insert(
+            "output_path".to_string(),
+            Value::String(normalize_relative(root, &out_path)),
+        );
+    }
+    append_history(root, &final_out);
+    let code = if final_out.get("ok").and_then(Value::as_bool) == Some(true) {
+        0
+    } else {
+        1
+    };
+    emit(final_out, code);
+}
+
 fn resolve_search_lensmap_paths(root: &Path, args: &ParsedArgs) -> Vec<String> {
     if let Some(raw) = args.get("lensmaps") {
         let mut paths = BTreeMap::new();
@@ -11711,6 +12429,10 @@ fn usage() {
     println!("lensmap sync [--lensmap=path] [--to=path] [--index=path] [--production]  # reanchor + simplify + artifact refresh");
     println!("lensmap expose --name=<lens_name>");
     println!("lensmap status [--lensmap=path]");
+    println!("lensmap public-health [--strict=1|0] [--docs=README.md,README.zh-CN.md] [--check-remote=1|0] [--out=path]");
+    println!("lensmap command parity [--docs=README.md,README.zh-CN.md] [--out=path]");
+    println!("lensmap release manifest [--version=vX.Y.Z] [--strict=1|0] [--check-remote=1|0] [--artifacts-dir=path] [--out=path]");
+    println!("lensmap release preflight [--strict=1|0] [--workflows-dir=.github/workflows] [--smoke=1|0] [--out=path]");
     println!();
     println!("{}", tr("Quickstart:", "快速开始："));
     println!("  lensmap init demo --mode=group --covers=demo/src");
@@ -11813,6 +12535,19 @@ fn main() {
         "sync" => cmd_sync(&root, &args),
         "expose" => cmd_expose(&root, &args),
         "status" => cmd_status(&root, &args),
+        "public-health" => cmd_public_health(&root, &args),
+        "command" if args.positional.get(1).map(String::as_str) == Some("parity") => {
+            cmd_command_parity(&root, &args)
+        }
+        "command-parity" => cmd_command_parity(&root, &args),
+        "release" if args.positional.get(1).map(String::as_str) == Some("manifest") => {
+            cmd_release_manifest(&root, &args)
+        }
+        "release" if args.positional.get(1).map(String::as_str) == Some("preflight") => {
+            cmd_release_preflight(&root, &args)
+        }
+        "release-manifest" => cmd_release_manifest(&root, &args),
+        "release-preflight" => cmd_release_preflight(&root, &args),
         _ => {
             usage();
             std::process::exit(2);
@@ -12390,5 +13125,246 @@ fn run(task: &str) -> bool {
         assert_eq!(stats.by_scope.get("src/ui"), Some(&1));
         assert_eq!(stats.by_directory.get("src/api"), Some(&1));
         assert_eq!(stats.by_directory.get("src/ui"), Some(&1));
+    }
+
+    #[test]
+    fn canonical_lensmap_doc_command_supports_nested_release_and_command_forms() {
+        assert_eq!(
+            canonical_lensmap_doc_command("lensmap command parity --docs=README.md"),
+            Some("command parity".to_string())
+        );
+        assert_eq!(
+            canonical_lensmap_doc_command("lensmap release manifest --version=v0.3.12"),
+            Some("release manifest".to_string())
+        );
+        assert_eq!(
+            canonical_lensmap_doc_command("lensmap release preflight --strict=1"),
+            Some("release preflight".to_string())
+        );
+        assert_eq!(
+            canonical_lensmap_doc_command("lensmap package evidence --bundle-dir=.lenspack"),
+            Some("package evidence".to_string())
+        );
+    }
+
+    #[test]
+    fn command_parity_payload_is_green_when_docs_match_registry() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_parity_payload_{nonce}"));
+        fs::create_dir_all(&root).unwrap();
+        let doc_path = root.join("README.md");
+        let body = lensmap_command_registry()
+            .iter()
+            .map(|cmd| format!("lensmap {cmd}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(&doc_path, format!("{body}\n")).unwrap();
+        let args = ParsedArgs::parse(&[format!("--docs={}", doc_path.to_string_lossy())]);
+        let payload = command_parity_payload(&root, &args);
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            payload
+                .get("missing_in_docs")
+                .and_then(Value::as_array)
+                .map(|rows| rows.len()),
+            Some(0)
+        );
+        assert_eq!(
+            payload
+                .get("stale_in_docs")
+                .and_then(Value::as_array)
+                .map(|rows| rows.len()),
+            Some(0)
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_preflight_payload_requires_valid_yaml_and_production_gate() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_release_preflight_{nonce}"));
+        let workflows = root.join(".github").join("workflows");
+        fs::create_dir_all(&workflows).unwrap();
+        fs::write(
+            workflows.join("production-gate.yml"),
+            "name: production-gate\non:\n  push:\n    branches: [main]\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        )
+        .unwrap();
+        let args = ParsedArgs::parse(&[
+            "--strict=1".to_string(),
+            "--smoke=0".to_string(),
+            "--workflows-dir=.github/workflows".to_string(),
+        ]);
+        let payload = release_preflight_payload(&root, &args);
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(true));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn release_manifest_payload_passes_with_tag_artifacts_checksums_and_docs() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_release_manifest_{nonce}"));
+        let app_root = root.join("apps").join("lensmap");
+        let artifacts = app_root.join("artifacts");
+        let scripts = app_root.join("scripts");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::create_dir_all(&scripts).unwrap();
+        fs::write(
+            app_root.join("README.md"),
+            "lensmap release manifest --version=v0.1.0\ncurl ... v0.1.0\n",
+        )
+        .unwrap();
+        fs::write(scripts.join("install.sh"), "VERSION=v0.1.0\n").unwrap();
+        fs::write(scripts.join("install.ps1"), "$Version = 'v0.1.0'\n").unwrap();
+        let artifact_path = artifacts.join("lensmap-v0.1.0.vsix");
+        fs::write(&artifact_path, "artifact").unwrap();
+        let artifact_hash = hash_bytes(b"artifact");
+        fs::write(
+            artifacts.join("checksums.sha256"),
+            format!("{artifact_hash}  lensmap-v0.1.0.vsix\n"),
+        )
+        .unwrap();
+
+        let init = Command::new("git")
+            .arg("init")
+            .current_dir(&root)
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+        let add = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .expect("git add");
+        assert!(add.status.success());
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "user.email=lensmap@test.local",
+                "-c",
+                "user.name=LensMap Test",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success());
+        let tag = Command::new("git")
+            .args(["tag", "v0.1.0"])
+            .current_dir(&root)
+            .output()
+            .expect("git tag");
+        assert!(tag.status.success());
+
+        let args = ParsedArgs::parse(&[
+            "--strict=1".to_string(),
+            "--version=v0.1.0".to_string(),
+        ]);
+        let payload = release_manifest_payload(&root, &args);
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(true));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn public_health_payload_passes_on_clean_mainline_release_ready_fixture() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = env::temp_dir().join(format!("lensmap_public_health_{nonce}"));
+        let app_root = root.join("apps").join("lensmap");
+        let artifacts = app_root.join("artifacts");
+        let scripts = app_root.join("scripts");
+        let workflows = root.join(".github").join("workflows");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::create_dir_all(&scripts).unwrap();
+        fs::create_dir_all(&workflows).unwrap();
+
+        let command_catalog = lensmap_command_registry()
+            .iter()
+            .map(|cmd| format!("lensmap {cmd}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        fs::write(
+            app_root.join("README.md"),
+            format!("{command_catalog}\nrelease-tag=v0.1.0\n"),
+        )
+        .unwrap();
+        fs::write(app_root.join("README.zh-CN.md"), format!("{command_catalog}\n")).unwrap();
+        fs::write(scripts.join("install.sh"), "VERSION=v0.1.0\n").unwrap();
+        fs::write(scripts.join("install.ps1"), "$Version = 'v0.1.0'\n").unwrap();
+        let artifact_path = artifacts.join("lensmap-v0.1.0.vsix");
+        fs::write(&artifact_path, "artifact").unwrap();
+        let artifact_hash = hash_bytes(b"artifact");
+        fs::write(
+            artifacts.join("checksums.sha256"),
+            format!("{artifact_hash}  lensmap-v0.1.0.vsix\n"),
+        )
+        .unwrap();
+        fs::write(
+            workflows.join("production-gate.yml"),
+            "name: production-gate\non:\n  push:\n    branches: [main]\njobs:\n  verify:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        )
+        .unwrap();
+
+        let init = Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&root)
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+        let checkout_main = Command::new("git")
+            .args(["checkout", "-B", "main"])
+            .current_dir(&root)
+            .output()
+            .expect("git checkout main");
+        assert!(checkout_main.status.success());
+        let add = Command::new("git")
+            .args(["add", "."])
+            .current_dir(&root)
+            .output()
+            .expect("git add");
+        assert!(add.status.success());
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "user.email=lensmap@test.local",
+                "-c",
+                "user.name=LensMap Test",
+                "commit",
+                "-m",
+                "init",
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("git commit");
+        assert!(commit.status.success());
+        let tag = Command::new("git")
+            .args(["tag", "v0.1.0"])
+            .current_dir(&root)
+            .output()
+            .expect("git tag");
+        assert!(tag.status.success());
+
+        let args = ParsedArgs::parse(&[
+            "--strict=1".to_string(),
+            "--version=v0.1.0".to_string(),
+            "--check-remote=0".to_string(),
+            "--smoke=0".to_string(),
+        ]);
+        let payload = public_health_payload(&root, &args);
+        assert_eq!(payload.get("ok").and_then(Value::as_bool), Some(true));
+        let _ = fs::remove_dir_all(&root);
     }
 }

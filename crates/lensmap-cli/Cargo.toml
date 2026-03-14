@@ -17,6 +17,7 @@ hex.workspace = true
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 sha2.workspace = true
 tar = "0.4"
 tree-sitter = "0.26.6"

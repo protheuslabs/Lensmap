@@ -213,6 +213,34 @@ lensmap policy check --lensmaps=demo/api/lensmap.json,demo/ui/lensmap.json --rep
 
 ## Common Operator Workflows
 
+### Release Hardening Gates
+
+```bash
+lensmap command parity --docs=README.md,README.zh-CN.md
+lensmap release manifest --version=v0.3.12 --strict=1
+lensmap release preflight --strict=1 --smoke=1
+lensmap public-health --strict=1 --check-remote=0
+```
+
+### Command Catalog Additions
+
+```bash
+lensmap template add <type>
+lensmap package evidence --bundle-dir=.lenspack
+lensmap restore --bundle-dir=.lenspack
+lensmap verify --bundle-dir=.lenspack
+lensmap reanchor --lensmap=demo/lensmap.json
+lensmap render --lensmap=demo/lensmap.json --file=demo/src/app.ts
+lensmap parse --lensmap=demo/lensmap.json
+lensmap simplify --lensmap=demo/lensmap.json
+lensmap metrics --lensmaps=demo/lensmap.json --period=run
+lensmap scorecard --lensmaps=demo/lensmap.json --period=run
+lensmap polish
+lensmap import --from=path/to/lensmap.json
+lensmap expose --name=default
+lensmap status --lensmap=demo/lensmap.json
+```
+
 ### Add a note by raw reference
 
 ```bash

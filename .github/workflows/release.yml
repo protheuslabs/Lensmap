@@ -72,7 +72,7 @@ jobs:
             "git_commit": "${GITHUB_SHA}",
             "sha256": "${archive_hash}"
           }
-JSON
+          JSON
 
       - name: Package (windows)
         if: runner.os == 'Windows'
@@ -100,7 +100,7 @@ JSON
             \"sha256\": \"$($archiveHash.ToLower())\",
             \"binary\": \"$binary\"
           }
-"@ | Out-File -Encoding utf8 -NoNewline "dist/manifest/$name.json"
+          "@ | Out-File -Encoding utf8 -NoNewline "dist/manifest/$name.json"
 
       - uses: actions/upload-artifact@v4
         with:
