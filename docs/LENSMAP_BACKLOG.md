@@ -168,6 +168,81 @@ This backlog converts selected SRS items into actionable implementation tasks fo
   - Corrupted artifact rejection test.
   - Reproducible manifest and verification path test.
 
+### LBM-011 — Enterprise support, security policy, and trust documentation
+- **SRS Linkage**: LM-SRS-041, LM-SRS-045, LM-SRS-047
+- **Priority**: P1
+- **Scope**: repository metadata, release documentation, `README.md`, `SECURITY.md`
+- **Description**
+  - Add and maintain public enterprise trust files (`SECURITY.md`, support matrix, governance policy, incident contact), and version them with repository release tags.
+  - Add a trust banner and release policy section in README with explicit scope, supported versions, and support channels.
+  - Require these files to be included in release artifact manifests and evidence envelopes.
+- **Acceptance**
+  - `SECURITY.md` and support policy file are discoverable and referenced in root docs.
+  - Release manifest includes doc hash set and policy hash used for trust verification.
+  - Evidence checks fail closed if required trust files are missing.
+- **Tests**
+  - Trust surface lint and presence test.
+  - Manifest digest mismatch test for modified trust docs.
+
+### LBM-012 — Enterprise CI observability and auto-remediation
+- **SRS Linkage**: LM-SRS-047, LM-SRS-029, LM-SRS-025
+- **Priority**: P1
+- **Scope**: `.github/workflows/`, workflow telemetry artifacts
+- **Description**
+  - Add explicit CI health budget checks for critical workflows (policy, strip, package, release, verify), including failure trend tracking.
+  - Emit deterministic workflow health receipts with recurring failure provenance.
+- **Acceptance**
+  - Every critical workflow emits health status for each required gate.
+  - Repeated failure signatures include root cause category and expected remediation suggestions.
+  - Health gate can optionally fail release commands when strict governance is enabled.
+- **Tests**
+  - CI health receipt generation test.
+  - Workflow failure pattern replay test.
+
+### LBM-013 — Cross-repo policy federation rollout plane
+- **SRS Linkage**: LM-SRS-042, LM-SRS-026, LM-SRS-029
+- **Priority**: P0
+- **Scope**: policy init/check, policy distribution bundle
+- **Description**
+  - Add signed policy bundle publishing/import flow for fleet org-level rollout.
+  - Add versioned policy provenance with deterministic drift detection and enforcement warnings for local overrides.
+- **Acceptance**
+  - Policy bundles are deterministic and signed.
+  - Drift detection reports include exact precedence witness and conflicting rule source.
+  - Local override mode can be approved but must emit explicit risk statement in run evidence.
+- **Tests**
+  - Policy bundle signature and drift test.
+  - Deterministic override conflict resolution test.
+
+### LBM-014 — Distribution and install pipeline hardening
+- **SRS Linkage**: LM-SRS-046, LM-SRS-047, LM-SRS-040
+- **Priority**: P1
+- **Scope**: `scripts/install.sh`, release packaging, package manifests
+- **Description**
+  - Make integrity checks on install default-on and fail-closed, including mandatory checksum and signed manifest validation.
+  - Add deterministic fallback mode for fully offline installation with local artifact trust cache.
+- **Acceptance**
+  - Offline installation path validates local cache provenance.
+  - Corrupted or unsigned artifacts always block install.
+  - Install receipts include installer command inputs and verification outcomes.
+- **Tests**
+  - Offline integrity test.
+  - Corrupted cache and unsigned artifact rejection tests.
+
+### LBM-015 — Enterprise toolchain interoperability and extension governance
+- **SRS Linkage**: LM-SRS-029, LM-SRS-030, LM-SRS-045
+- **Priority**: P1
+- **Scope**: `lensmap ext`/editor extension integration, connector registry
+- **Description**
+  - Add deterministic extension contract tests for editor plugins/extension outputs to avoid drift against core command outputs.
+  - Add extension compatibility matrix and deprecation policy with pinned minimum LensMap version expectations.
+- **Acceptance**
+  - Extension contracts remain stable across patch releases.
+  - Version mismatch policy failures are deterministic and include upgrade path.
+- **Tests**
+  - Extension compatibility matrix regression test.
+  - Version/contract mismatch enforcement test.
+
 ## Execution Sequence
 
 1. LBM-001
@@ -180,3 +255,8 @@ This backlog converts selected SRS items into actionable implementation tasks fo
 8. LBM-008
 9. LBM-009
 10. LBM-010
+11. LBM-011
+12. LBM-012
+13. LBM-013
+14. LBM-014
+15. LBM-015

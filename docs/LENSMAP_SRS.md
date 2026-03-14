@@ -345,6 +345,57 @@ The corrective direction is already documented in the tech stack and backlog:
 - Human-gated decisions shall be auditable and replay-linked to the originating source context and auto-run attempt ID.
 - Unresolved low-confidence proposals shall block strict-mode policy if configured.
 
+### LM-SRS-041 Enterprise Trust Surface and Public Credibility Signals
+
+- LensMap shall provide trust-focused evidence surfaces for procurement review:
+  - signed release manifests,
+  - immutable changelog provenance,
+  - dependency/license audit references,
+  - and security response metadata.
+- `lensmap trust` (or equivalent command family) shall export machine-readable trust artifacts suitable for external audit and procurement intake systems.
+- Trust artifacts shall include deterministic build recipe fingerprint, dependency graph integrity checks, policy snapshot hash, and command identity.
+
+### LM-SRS-042 Fleet Policy Federation and Safe Rollout
+
+- LensMap shall support fleet-level onboarding workflows with:
+  - repo enrollment,
+  - policy preset propagation,
+  - policy baseline generation,
+  - and staged rollout with reproducible checkpoints.
+- Policy source precedence must remain deterministic with explicit override expiry semantics.
+- Fleet rollout outputs shall include per-repo acceptance or rejection receipts with machine-readable reason codes.
+
+### LM-SRS-043 Release Admission and Merge Gate Envelope
+
+- LensMap shall emit a deterministic admission bundle combining:
+  - policy check result,
+  - boundary-risk signal,
+  - atlas delta summary,
+  - and evidence envelope references.
+- `lensmap admission` (or equivalent) shall support CI/PR automation with stable `pass|warn|block` codes.
+- Admission output shall be replayable and include canonical schema versioning.
+
+### LM-SRS-044 Evidence Vault and Long-Lived Retention Plane
+
+- LensMap shall provide deterministic export/import of evidence to a local or centrally synchronized vault.
+- Vault entries shall include ledger-backed identity metadata for:
+  - policy runs,
+  - metrics/scorecard snapshots,
+  - package evidence,
+  - and restore/verify operations.
+- Vault import must validate digest continuity and retention policy applicability before replay.
+- Vault operations must be replayable and idempotent for unchanged inputs.
+
+### LM-SRS-045 Security, Dependency, and Compliance Plane (LensMap-Facing)
+
+- LensMap shall integrate optional dependency and license/security enrichment signals.
+- Policy checks may include deterministic enforcement of:
+  - high-risk dependency changes,
+  - disallowed licenses,
+  - and known secret-handling risks in config annotations.
+- `policy check --security` mode shall fail closed in strict mode and emit deterministic citations for each security-related violation.
+- Security findings from this plane shall be visible in `atlas`, `policy`, and admission artifacts with explicit override pathways.
+
 ## Non-Functional Requirements
 
 ### LM-SRS-014 Fail-Closed Safety
