@@ -1,5 +1,15 @@
 # LensMap ⇄ Prism Reference (Boundary Contract)
 
+## Philosophy
+
+LensMap is the "knowledge compression" half of the system.
+
+It exists so a single operator can hold a 30M LOC estate in fast mental focus by replacing inline noise with durable, symbol-linked knowledge artifacts.
+
+The principle is the same one Archimedes used: increase leverage by reducing cognitive friction per decision.
+- Long leverage = high-quality anchors, clear context, and policy-grounded evidence.
+- Stable anchors and canonical policy surfaces keep one person productive as scale grows.
+
 ## LensMap Scope
 
 LensMap owns source-linked knowledge and governance hygiene for code artifacts.
@@ -10,12 +20,22 @@ In scope:
 - Policy and hygiene checks for ownership/review/evidence requirements
 - Packaging and evidence artifact generation for CI/report consumers
 - API and editor integrations around annotation workflows
+- Atlas summaries, handoff packets, and deterministic continuity outputs for one-operator scale
 
 Out of scope:
 - Work prioritization and scheduling
 - Incident lifecycle management
 - Remediation execution orchestration
 - Resource budgeting and operator runbook decisions
+
+## Why this boundary exists
+
+Without the boundary, operational policy and code annotation become entangled.
+
+With this boundary:
+- LensMap keeps the source truth compact and explainable.
+- Prism keeps the action surface bounded to what one operator can execute safely.
+- Both remain independently improvable and testable.
 
 ## Prism Inputs from LensMap
 

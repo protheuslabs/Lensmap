@@ -2,7 +2,9 @@
 
 ## Purpose
 
-LensMap shall reduce knowledge and documentation boilerplate around source code while keeping the code itself lean, inspectable, and machine-manageable.
+LensMap exists to make knowledge scalable for very large repos by externalizing and structuring explanation, ownership, review, and compliance context around code.
+
+Its philosophy is to create fast operator comprehension through deterministic, symbol-linked compression. A single operator should be able to understand "what matters now" in large codebases without a proportional increase in cognitive load.
 
 ## Scope
 
@@ -15,8 +17,22 @@ This tranche covers:
 - repo-aware summaries
 - PR-oriented note reporting
 - explicit machine/human/editor artifact layering
+- one-person scalability through prioritized comprehension surfaces
 
 ## Functional Requirements
+
+### LM-SRS-048 Atlas for One-Person Scale
+
+- LensMap shall provide an `atlas` posture surface designed for single-operator scaling: a concise summary of the highest-impact risks and gaps in the repository.
+- For every major scope unit (directory/module/domain), LensMap shall emit:
+  - owner coverage
+  - stale/debt density
+  - policy/compliance posture
+  - churn sensitivity
+  - unresolved risk score
+- `lensmap atlas` (or equivalent command surface) shall sort scope units by operator impact and produce a bounded "what to inspect first" list.
+- Atlas output shall be deterministic for unchanged input and suitable for direct ingestion by Prism.
+- Atlas outputs shall include a compact confidence score to reduce false urgency and unnecessary triage.
 
 ### LM-SRS-001 Knowledge Boilerplate Positioning
 
@@ -262,6 +278,41 @@ This tranche covers:
 
 - LensMap shall classify every import proposal and policy exception by automation confidence.
 - Proposals below confidence threshold shall be routed to human gating workflows and tracked as non-automatable actions in [LENSMAP_HUMAN_METRICS_OPERATIONS.md](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_HUMAN_METRICS_OPERATIONS.md).
+
+### LM-SRS-037 Operator Continuity and Handoff Packets
+
+- LensMap shall provide a deterministic `handoff packet` export for single-operator sessions.
+- The packet shall include:
+  - active critical scope units and their unresolved risk scores,
+  - recent policy/gate outcomes,
+  - most recent evidence and confidence thresholds used,
+  - and a compact context index for fastest onboarding continuation.
+- Handoff packets shall be importable into a subsequent LensMap session without replaying full ingest.
+- Handoff packet format and generation shall be versioned and checksummed.
+
+### LM-SRS-038 Cognitive Load Compression Profiles
+
+- LensMap shall support operator cognition profiles (`focused`, `incident`, `context-build`) that tune what is surfaced in summaries and reports.
+- For each profile, LensMap shall deterministically suppress low-impact notes while preserving all risk-blocking and policy-failing signals.
+- Prism integration mode shall receive only profile-compatible outputs so a single operator can stay within bounded scan cycles.
+- Profiles shall include explicit cut-off criteria and be replayable for audit.
+
+### LM-SRS-039 Cross-Boundary Risk Amplification
+
+- LensMap shall detect and tag symbols/modules that participate in cross-boundary coupling (policy domain, compliance domain, or team boundary transitions).
+- Risk scores and policy gates shall include a boundary-amplification term for cross-boundary paths.
+- LensMap atlas/prioritized reports shall explicitly include boundary-amplified risks as a first-class lane for operator triage.
+- LensMap shall emit explicit guidance links for boundary transition review when coupled changes are detected by `pr report` or `atlas`.
+
+### LM-SRS-040 Deterministic Atlas Diff for Operator State
+
+- LensMap shall support `atlas --delta` between two snapshots or commits.
+- Atlas delta shall be deterministic and include:
+  - added/removed risk units,
+  - score shifts by scope unit,
+  - changed policy violations,
+  - and operator action impact estimation.
+- Atlas deltas shall be emitible in machine format to support long-range trend analysis for large estates.
 - Operators shall be able to define confidence thresholds and allowed auto-accept lists by repo/team/path.
 - Human-gated decisions shall be auditable and replay-linked to the originating source context and auto-run attempt ID.
 - Unresolved low-confidence proposals shall block strict-mode policy if configured.
@@ -576,3 +627,5 @@ This tranche covers:
 - `package evidence` can generate or resolve all required dependent artifacts for the requested include flags, or fail closed with explicit missing-artifact errors.
 - `verify` blocks invalid restore operations for corrupted, policy-incompatible, or schema-incompatible evidence bundles.
 - Enterprise release qualification produces a compatibility manifest, reproducibility proof, and runtime validation receipts in addition to build, regression, and security receipts.
+- LensMap `atlas` output is sufficient for a one-operator cycle to recover priority context across 1M+ LOC from a changed repository without full-file spelunking.
+- A stable posture snapshot and score ordering shall enable one-person triage of top 10 critical areas in under 30 minutes.
