@@ -22,6 +22,8 @@ In scope:
 - API and editor integrations around annotation workflows
 - Atlas summaries, handoff packets, and deterministic continuity outputs for one-operator scale
 
+Execution priority for one-operator continuity and scale-readiness requirements is tracked in [`LENSMAP_BACKLOG.md`](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_BACKLOG.md).
+
 Out of scope:
 - Work prioritization and scheduling
 - Incident lifecycle management

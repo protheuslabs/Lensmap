@@ -18,6 +18,7 @@ This tranche covers:
 - PR-oriented note reporting
 - explicit machine/human/editor artifact layering
 - one-person scalability through prioritized comprehension surfaces
+- For a single-file execution backlog of scale-readiness, see [`LENSMAP_BACKLOG.md`](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_BACKLOG.md).
 
 ## Functional Requirements
 
