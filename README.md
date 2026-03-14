@@ -56,6 +56,20 @@ Resolution order is designed to survive normal refactors:
 - English and Chinese CLI and editor support
 - Fail-closed root-path safety for generated artifacts and package operations
 
+## Canonical implementation stack (target)
+
+LensMap's implementation target is an enterprise-ready, deterministic Rust control plane with a modular architecture.
+
+- Runtime: Rust 2021
+- Parser layer: `tree-sitter` with deterministic symbol-based anchoring
+- Policy and validation: deterministic rule engine with strict/warn/fail semantics
+- Evidence plane: receipt artifacts, hash-chain-friendly run records, and signed/attestable release paths
+- Packaging surface: stable strip/package/restore pipeline with replay-safe manifests
+- Integration: schema-stable connectors/events for CI and enterprise tooling
+
+Target stack and implementation sequencing is documented in:
+[LENSMAP_TECH_STACK.md](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_TECH_STACK.md)
+
 ## Recommended Use
 
 Use LensMap for:

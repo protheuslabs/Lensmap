@@ -20,6 +20,33 @@ This tranche covers:
 - one-person scalability through prioritized comprehension surfaces
 - For a single-file execution backlog of scale-readiness, see [`LENSMAP_BACKLOG.md`](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_BACKLOG.md).
 
+## Reference Architecture and Implementation Plan
+
+The canonical implementation stack and execution sequencing are defined in:
+- [`LENSMAP_TECH_STACK.md`](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_TECH_STACK.md)
+
+This doc is normative for implementation decomposition and sequencing:
+- module boundaries,
+- policy/evidence plane ordering,
+- deterministic output envelopes,
+- and enterprise readiness milestones.
+
+## Is this the ideal architecture today?
+
+LensMap is strategically in the right architectural direction, but not yet at full ideal form because it remains tied to command-heavy concentration and still has active coupling between workflow surfaces, packaging, and policy logic.
+
+The current practical risk is maintainability and upgrade velocity at very large scale, not product concept:
+- The monolithic command surface is being actively decomposed (and should continue to be).
+- Deterministic evidence and policy planes should be isolated boundaries with explicit shared schemas.
+- CI and release integrations should be normalized behind one evidence pipeline with predictable contract versions.
+- Policy federation and control-plane inputs should remain strict, versioned, and replayable.
+
+The corrective direction is already documented in the tech stack and backlog:
+- keep LensMap focused on source-linked truth and operator context,
+- keep orchestration and enforcement policy execution in Prism,
+- keep control-plane and federation concerns explicit and versioned,
+- and treat every command that writes/decides as a receipt-first transition.
+
 ## Functional Requirements
 
 ### LM-SRS-048 Atlas for One-Person Scale

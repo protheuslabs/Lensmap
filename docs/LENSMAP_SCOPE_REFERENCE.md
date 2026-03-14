@@ -24,6 +24,9 @@ In scope:
 
 Execution priority for one-operator continuity and scale-readiness requirements is tracked in [`LENSMAP_BACKLOG.md`](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_BACKLOG.md).
 
+Implementation sequencing and stack target are defined in:
+[`LENSMAP_TECH_STACK.md`](/Users/jay/.openclaw/workspace/apps/lensmap/docs/LENSMAP_TECH_STACK.md).
+
 Out of scope:
 - Work prioritization and scheduling
 - Incident lifecycle management
