@@ -33,6 +33,23 @@ Out of scope:
 - Remediation execution orchestration
 - Resource budgeting and operator runbook decisions
 
+## Complementary platform components (out of LensMap scope)
+
+LensMap remains the knowledge compression and governance evidence plane.
+
+The following enterprise components are separate but tightly contract-coupled:
+
+- Policy federation and override service
+- Trust/evidence vault and signed release manifest service
+- Incident command and recovery orchestration plane
+- Observability/SLO and reliability telemetry plane
+- Secrets and identity boundary plane
+- Cross-repo contract and ownership registry
+- Release and delivery integration plane
+- AI proposal safety guard and governance compliance hooks
+
+Each companion system must consume LensMap artifacts using the same deterministic run-ID, policy hash, and manifest references defined in SRS and backlog.
+
 ## Why this boundary exists
 
 Without the boundary, operational policy and code annotation become entangled.
